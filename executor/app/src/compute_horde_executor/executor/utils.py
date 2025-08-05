@@ -1,11 +1,14 @@
+import aiodocker
 import asyncio
 import csv
+import docker
 import logging
 import re
 import shutil
 import subprocess
 import typing
 from contextlib import asynccontextmanager
+from typing import List
 
 from compute_horde.utils import MachineSpecs
 
@@ -135,3 +138,119 @@ async def temporary_process(program, *args, clean_exit_timeout: float = 1.0, **s
                 process.kill()
         except Exception as e:
             logger.error(f"Failed to clean up process `{program}` ({args=}): {e}", exc_info=True)
+
+
+@asynccontextmanager
+async def temporary_docker_container_non_aiodocker(
+    image: str, command: str, clean_exit_timeout: float = 1.0, **container_kwargs
+):
+    """
+    Context manager for Docker containers using Docker SDK.
+    Creates and runs a container in a separate thread, yields it for interaction, and cleans it up after the context exits.
+
+    Parameters:
+        image: Docker image to run
+        command: Command to execute in the container
+        clean_exit_timeout: Seconds to wait before force kill (default: 1.0)
+        **container_kwargs: Additional keyword arguments passed to docker.containers.run()
+    """
+    client = docker.from_env()
+
+    def run_docker_container_in_thread():
+        container = client.containers.run(
+            image,
+            command,
+            detach=True,
+            remove=False,
+            **container_kwargs,
+        )
+        container.wait()
+        return container
+
+    container = None
+    try:
+        # Create and start the container in the background
+        container = await asyncio.to_thread(run_docker_container_in_thread)
+        yield container
+    finally:
+        if container:
+            try:
+                # Try to stop the container (with SIGTERM and then after timeout with SIGKILL)
+                try:
+                    container.stop(timeout=int(clean_exit_timeout))
+                except Exception as e:
+                    logger.warning(f"Failed to stop container: {e}")
+                    # Force remove if SIGTERM and SIGKILL failed
+                    try:
+                        container.remove(force=True)
+                    except Exception as kill_e:
+                        logger.error(f"Failed to force remove container: {kill_e}")
+
+                # Remove the container nicely if it stopped
+                try:
+                    container.remove()
+                except Exception as e:
+                    logger.warning(f"Failed to remove stopped container: {e}")
+
+            except Exception as e:
+                logger.error(f"Failed to clean up container: {e}", exc_info=True)
+
+        # Close the Docker client
+        try:
+            client.close()
+        except Exception as e:
+            logger.warning(f"Failed to close Docker client: {e}")
+
+
+@asynccontextmanager
+async def temporary_docker_container(
+    image: str, command: List[str] = None, clean_exit_timeout: float = 1.0, **container_kwargs
+):
+    """
+    Context manager for Docker containers using Docker SDK.
+    Creates and runs a container in a separate thread, yields it for interaction, and cleans it up after the context exits.
+
+    Parameters:
+        image: Docker image to run
+        command: Command to execute in the container. This should be formatted as a list that the
+            Docker API would understand, e.g. ["bash", "-c", "..."]. If None, will run the default
+            command for the image (default: None)
+        clean_exit_timeout: Seconds to wait before force kill (default: 1.0)
+        **container_kwargs: Additional keyword arguments passed to docker.containers.run()
+    """
+    client = aiodocker.Docker()
+    container = None
+
+    # Configure and run the Docker container
+    config = {"Image": image, **container_kwargs}
+    if command:
+        config["Cmd"] = command
+    container = await client.containers.create(config)
+    await container.start()
+    await container.wait()
+
+    try:
+        yield container
+    finally:
+        if container:
+            try:
+                # Try to stop the container (with SIGTERM and then after timeout with SIGKILL)
+                try:
+                    await container.stop(timeout=int(clean_exit_timeout))
+                except Exception as e:
+                    logger.warning(f"Failed to stop container: {e}")
+
+                # Remove the container
+                try:
+                    await container.delete(force=True)
+                except Exception as e:
+                    logger.warning(f"Failed to remove container: {e}")
+
+            except Exception as e:
+                logger.error(f"Failed to clean up container: {e}", exc_info=True)
+
+        # Close the Docker client
+        try:
+            await client.close()
+        except Exception as e:
+            logger.warning(f"Failed to close Docker client: {e}")

@@ -8,7 +8,7 @@ from django.conf import settings
 
 from compute_horde_executor.executor.job_runner import BaseJobRunner
 from compute_horde_executor.executor.miner_client import JobError, MinerClient
-from compute_horde_executor.executor.utils import get_machine_specs, temporary_process
+from compute_horde_executor.executor.utils import get_machine_specs, temporary_docker_container
 
 logger = logging.getLogger(__name__)
 
@@ -186,65 +186,56 @@ class JobDriver:
 
     async def run_cve_2022_0492_check_or_fail(self):
         # TODO: TIMEOUTS - This doesn't kill the docker container, just the docker process that communicates with it.
-        async with temporary_process(
-            "docker",
-            "run",
-            "--rm",
-            CVE_2022_0492_IMAGE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        ) as docker_process:
-            stdout, stderr = await docker_process.communicate()
-            return_code = docker_process.returncode
+        async with temporary_docker_container(image=CVE_2022_0492_IMAGE) as docker_container:
+            stdout = "".join(await docker_container.log(stdout=True, stderr=False))
+            stderr = "".join(await docker_container.log(stdout=False, stderr=True))
+            return_code = docker_container["State"]["ExitCode"]
 
         if return_code != 0:
             raise JobError(
                 "CVE-2022-0492 check failed",
-                error_detail=f'stdout="{stdout.decode()}"\nstderr="{stderr.decode()}"',
+                error_detail=f'stdout="{stdout}"\nstderr="{stderr}"',
             )
 
         expected_output = "Contained: cannot escape via CVE-2022-0492"
-        if expected_output not in stdout.decode():
+        if expected_output not in stdout:
             raise JobError(
                 f'CVE-2022-0492 check failed: "{expected_output}" not in stdout.',
                 V0JobFailedRequest.ErrorType.SECURITY_CHECK,
-                f'stdout="{stdout.decode()}"\nstderr="{stderr.decode()}"',
+                f'stdout="{stdout}"\nstderr="{stderr}"',
             )
 
     async def run_nvidia_toolkit_version_check_or_fail(self):
-        # TODO: TIMEOUTS - This doesn't kill the docker container, just the docker process that communicates with it.
-        async with temporary_process(
-            "docker",
-            "run",
-            "--rm",
-            "--privileged",
-            "-v",
-            "/:/host:ro",
-            "-v",
-            "/usr/bin:/usr/bin",
-            "-v",
-            "/usr/lib:/usr/lib",
-            "ubuntu:latest",
-            "bash",
-            "-c",
-            "nvidia-container-toolkit --version",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        ) as docker_process:
-            stdout, stderr = await docker_process.communicate()
-            return_code = docker_process.returncode
-
+        async with temporary_docker_container(
+            image="ubuntu:latest",
+            command=["bash", "-c", "nvidia-container-toolkit --version"],
+            HostConfig={
+                "Privileged": True,
+                "Binds": [
+                    "/:/host:ro",
+                    "/usr/bin:/usr/bin",
+                    "/usr/lib:/usr/lib",
+                ],
+            },
+            Tty=False,
+            AttachStdout=True,
+            AttachStderr=True,
+        ) as docker_container:
+            stdout = "".join(await docker_container.log(stdout=True, stderr=False))
+            stderr = "".join(await docker_container.log(stdout=False, stderr=True))
+            return_code = docker_container["State"]["ExitCode"]
+        
         if return_code != 0:
             raise JobError(
                 f"nvidia-container-toolkit check failed: exit code {return_code}",
-                error_detail=f'stdout="{stdout.decode()}"\nstderr="{stderr.decode()}"',
+                error_detail=f'stdout="{stdout}"\nstderr="{stderr}"',
             )
 
-        lines = stdout.decode().splitlines()
+        lines = stdout.splitlines()
         if not lines:
             raise JobError(
                 "nvidia-container-toolkit check failed: no output from nvidia-container-toolkit",
-                error_detail=f'stdout="{stdout.decode()}"\nstderr="{stderr.decode()}"',
+                error_detail=f'stdout="{stdout}"\nstderr="{stderr}"',
             )
 
         version = lines[0].rpartition(" ")[2]
@@ -256,7 +247,7 @@ class JobDriver:
                 f"Outdated NVIDIA Container Toolkit detected:"
                 f'{version}" not >= {NVIDIA_CONTAINER_TOOLKIT_MINIMUM_SAFE_VERSION}',
                 V0JobFailedRequest.ErrorType.SECURITY_CHECK,
-                f'stdout="{stdout.decode()}"\nstderr="{stderr.decode()}',
+                f'stdout="{stdout}"\nstderr="{stderr}',
             )
 
     async def fail_if_execution_unsuccessful(self):
