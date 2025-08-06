@@ -108,101 +108,6 @@ def get_machine_specs() -> MachineSpecs:
 
 
 @asynccontextmanager
-async def temporary_process(program, *args, clean_exit_timeout: float = 1.0, **subprocess_kwargs):
-    """
-    Context manager.
-    Runs the program in a subprocess, yields it for you to interact with and cleans it up after the context exits.
-    This will first try to stop the process nicely but kill it shortly after.
-
-    Parameters:
-        program: Program to execute
-        *args: Program arguments
-        clean_exit_timeout: Seconds to wait before force kill (default: 1.0)
-        **subprocess_kwargs: Additional keyword arguments passed to asyncio.create_subprocess_exec()
-    """
-    process = await asyncio.create_subprocess_exec(program, *args, **subprocess_kwargs)
-    try:
-        yield process
-    finally:
-        try:
-            try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=clean_exit_timeout)
-            except ProcessLookupError:
-                # Process already gone - nothing to do
-                pass
-            except TimeoutError:
-                logger.warning(
-                    f"Process `{program}` didn't exit after {clean_exit_timeout} seconds - killing ({args=})"
-                )
-                process.kill()
-        except Exception as e:
-            logger.error(f"Failed to clean up process `{program}` ({args=}): {e}", exc_info=True)
-
-
-@asynccontextmanager
-async def temporary_docker_container_non_aiodocker(
-    image: str, command: str, clean_exit_timeout: float = 1.0, **container_kwargs
-):
-    """
-    Context manager for Docker containers using Docker SDK.
-    Creates and runs a container in a separate thread, yields it for interaction, and cleans it up after the context exits.
-
-    Parameters:
-        image: Docker image to run
-        command: Command to execute in the container
-        clean_exit_timeout: Seconds to wait before force kill (default: 1.0)
-        **container_kwargs: Additional keyword arguments passed to docker.containers.run()
-    """
-    client = docker.from_env()
-
-    def run_docker_container_in_thread():
-        container = client.containers.run(
-            image,
-            command,
-            detach=True,
-            remove=False,
-            **container_kwargs,
-        )
-        container.wait()
-        return container
-
-    container = None
-    try:
-        # Create and start the container in the background
-        container = await asyncio.to_thread(run_docker_container_in_thread)
-        yield container
-    finally:
-        if container:
-            try:
-                # Try to stop the container (with SIGTERM and then after timeout with SIGKILL)
-                try:
-                    container.stop(timeout=int(clean_exit_timeout))
-                except Exception as e:
-                    logger.warning(f"Failed to stop container: {e}")
-                    # Force remove if SIGTERM and SIGKILL failed
-                    try:
-                        container.remove(force=True)
-                    except Exception as kill_e:
-                        logger.error(f"Failed to force remove container: {kill_e}")
-
-                # Remove the container nicely if it stopped
-                try:
-                    container.remove()
-                except Exception as e:
-                    logger.warning(f"Failed to remove stopped container: {e}")
-
-            except Exception as e:
-                logger.error(f"Failed to clean up container: {e}", exc_info=True)
-
-        # Close the Docker client
-        try:
-            client.close()
-        except Exception as e:
-            logger.warning(f"Failed to close Docker client: {e}")
-
-
-@asynccontextmanager
 async def temporary_docker_container(
     image: str, command: List[str] = None, clean_exit_timeout: float = 1.0, **container_kwargs
 ):
@@ -216,7 +121,7 @@ async def temporary_docker_container(
             Docker API would understand, e.g. ["bash", "-c", "..."]. If None, will run the default
             command for the image (default: None)
         clean_exit_timeout: Seconds to wait before force kill (default: 1.0)
-        **container_kwargs: Additional keyword arguments passed to docker.containers.run()
+        **container_kwargs: Additional keyword arguments passed to aiodocker.Docker.containers.create()
     """
     client = aiodocker.Docker()
     container = None
@@ -227,7 +132,6 @@ async def temporary_docker_container(
         config["Cmd"] = command
     container = await client.containers.create(config)
     await container.start()
-    await container.wait()
 
     try:
         yield container
@@ -254,3 +158,9 @@ async def temporary_docker_container(
             await client.close()
         except Exception as e:
             logger.warning(f"Failed to close Docker client: {e}")
+
+
+async def get_docker_container_outputs(container: aiodocker.containers.DockerContainer):
+    stdout = "".join(await container.log(stdout=True, stderr=False))
+    stderr = "".join(await container.log(stdout=False, stderr=True))
+    return stdout, stderr
