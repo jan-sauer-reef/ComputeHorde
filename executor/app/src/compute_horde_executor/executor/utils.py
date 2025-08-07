@@ -108,6 +108,7 @@ def get_machine_specs() -> MachineSpecs:
 @asynccontextmanager
 async def docker_container_wrapper(
     image: str,
+    name: str = None,
     command: List[str] = None,
     clean_exit_timeout: float = 1.0,
     auto_remove: bool = False,
@@ -119,6 +120,7 @@ async def docker_container_wrapper(
 
     Parameters:
         image: Docker image to run
+        name: Name of the container (default: None)
         command: Command to execute in the container. This should be formatted as a list that the
             Docker API would understand, e.g. ["bash", "-c", "..."]. If None, will run the default
             command for the image (default: None)
@@ -133,7 +135,7 @@ async def docker_container_wrapper(
     config = {"Image": image, **container_kwargs}
     if command:
         config["Cmd"] = command
-    container = await client.containers.create(config)
+    container = await client.containers.create(config=config, name=name)
     await container.start()
 
     try:

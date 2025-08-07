@@ -361,6 +361,7 @@ class BaseJobRunner(ABC):
         async with docker_container_wrapper(
             image="alpine:3.19",
             command=["sh", "-c", f"rm -rf {shlex.quote(root_for_remove.as_posix())}/*"],
+            auto_remove=True,
             HostConfig={
                 "Binds": [
                     f"{self.temp_dir.as_posix()}/:/{root_for_remove.as_posix()}/",
@@ -465,7 +466,7 @@ class DefaultJobRunner(BaseJobRunner):
         )
 
         # Build keyword arguments to be passed to aiodocker.Docker().containers.create()
-        docker_kwargs = {"name": self.job_container_name, "HostConfig": {}}
+        docker_kwargs = {"name": self.job_container_name, "auto_remove": True, "HostConfig": {}}
         
         # NVIDIA environment
         docker_kwargs["HostConfig"].update(preset_to_docker_run_args(
@@ -488,7 +489,6 @@ class DefaultJobRunner(BaseJobRunner):
                     logger.warning(f"Failed to create network {job_network}: {e}")
         docker_kwargs["HostConfig"]["NetworkMode"] = job_network
 
-        extra_volume_flags = []
         if self.full_job_request.raw_script:
             raw_script_path = self.temp_dir / "script.py"
             raw_script_path.write_text(self.full_job_request.raw_script)
