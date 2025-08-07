@@ -8,7 +8,7 @@ from django.conf import settings
 
 from compute_horde_executor.executor.job_runner import BaseJobRunner
 from compute_horde_executor.executor.miner_client import JobError, MinerClient
-from compute_horde_executor.executor.utils import get_docker_container_outputs, get_machine_specs, temporary_docker_container
+from compute_horde_executor.executor.utils import get_docker_container_outputs, get_machine_specs, docker_container_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,7 @@ class JobDriver:
             await self.run_nvidia_toolkit_version_check_or_fail()
 
     async def run_cve_2022_0492_check_or_fail(self):
-        async with temporary_docker_container(image=CVE_2022_0492_IMAGE) as docker_container:
+        async with docker_container_wrapper(image=CVE_2022_0492_IMAGE, auto_remove=True) as docker_container:
             results = await docker_container.wait()
             return_code = results["StatusCode"]
             stdout, stderr = await get_docker_container_outputs(docker_container)
@@ -205,9 +205,10 @@ class JobDriver:
             )
 
     async def run_nvidia_toolkit_version_check_or_fail(self):
-        async with temporary_docker_container(
+        async with docker_container_wrapper(
             image="ubuntu:latest",
             command=["bash", "-c", "nvidia-container-toolkit --version"],
+            auto_remove=True,
             HostConfig={
                 "Privileged": True,
                 "Binds": [

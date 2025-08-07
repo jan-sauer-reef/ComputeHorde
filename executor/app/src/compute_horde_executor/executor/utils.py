@@ -1,7 +1,5 @@
 import aiodocker
-import asyncio
 import csv
-import docker
 import logging
 import re
 import shutil
@@ -108,12 +106,16 @@ def get_machine_specs() -> MachineSpecs:
 
 
 @asynccontextmanager
-async def temporary_docker_container(
-    image: str, command: List[str] = None, clean_exit_timeout: float = 1.0, **container_kwargs
+async def docker_container_wrapper(
+    image: str,
+    command: List[str] = None,
+    clean_exit_timeout: float = 1.0,
+    auto_remove: bool = False,
+    **container_kwargs,
 ):
     """
     Context manager for Docker containers using Docker SDK.
-    Creates and runs a container in a separate thread, yields it for interaction, and cleans it up after the context exits.
+    Creates and runs a container in a separate thread, yields it for interaction, and closes the client after the context exits.
 
     Parameters:
         image: Docker image to run
@@ -121,6 +123,7 @@ async def temporary_docker_container(
             Docker API would understand, e.g. ["bash", "-c", "..."]. If None, will run the default
             command for the image (default: None)
         clean_exit_timeout: Seconds to wait before force kill (default: 1.0)
+        auto_remove: Automatically remove the container on exit. Equivalent to --rm flag (default: False)
         **container_kwargs: Additional keyword arguments passed to aiodocker.Docker.containers.create()
     """
     client = aiodocker.Docker()
@@ -136,7 +139,7 @@ async def temporary_docker_container(
     try:
         yield container
     finally:
-        if container:
+        if container and auto_remove:
             try:
                 # Try to stop the container (with SIGTERM and then after timeout with SIGKILL)
                 try:

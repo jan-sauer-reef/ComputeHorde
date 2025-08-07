@@ -10,7 +10,6 @@ import shlex
 import shutil
 import tempfile
 from abc import ABC, abstractmethod
-from asyncio.subprocess import Process
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -34,7 +33,7 @@ from compute_horde_core.volume import (
 from django.conf import settings
 
 from compute_horde_executor.executor.miner_client import ExecutionResult, JobError, JobResult
-from compute_horde_executor.executor.utils import get_docker_container_outputs, temporary_docker_container
+from compute_horde_executor.executor.utils import get_docker_container_outputs, docker_container_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +289,7 @@ class BaseJobRunner(ABC):
             )
 
         await self.before_start_job()
-        async with temporary_docker_container(
+        async with docker_container_wrapper(
             image=await self.get_docker_image(),
             command=await self.get_docker_run_cmd(),
             **docker_kwargs,
@@ -359,7 +358,7 @@ class BaseJobRunner(ABC):
     async def clean(self):
         # remove input/output directories with docker, to deal with funky file permissions
         root_for_remove = pathlib.Path("/temp_dir/")
-        async with temporary_docker_container(
+        async with docker_container_wrapper(
             image="alpine:3.19",
             command=["sh", "-c", f"rm -rf {shlex.quote(root_for_remove.as_posix())}/*"],
             HostConfig={
