@@ -1,4 +1,5 @@
 import aiodocker
+import asyncio
 import csv
 import logging
 import re
@@ -22,16 +23,46 @@ def run_cmd(cmd):
     return proc.stdout
 
 
+async def run_nvidia_smi():
+    async with aiodocker.Docker() as client:
+        container = await client.containers.create({
+            "Image": "ubuntu",
+            "Cmd": [
+                "nvidia-smi",
+                "--query-gpu=name,driver_version,name,memory.total,compute_cap,power.limit,clocks.gr,clocks.mem,uuid,serial",
+                "--format=csv"
+            ],
+            "HostConfig": {
+                "Runtime": "nvidia",
+                "DeviceRequests": [
+                    {
+                        "Driver": "nvidia",
+                        "Count": -1,
+                        "Capabilities": [["gpu"]],
+                    }
+                ],
+            }
+        })
+        await container.start()
+        result = await container.wait()
+        stdout, stderr = await get_docker_container_outputs(container)
+        await container.remove(force=True)
+
+        if result["StatusCode"] != 0:
+            raise RuntimeError(
+                f"run_nvidia_smi error ({result['StatusCode']}) {stdout=!r} {stderr=!r}"
+            )
+
+        return stdout
+
+
 @typing.no_type_check
 def get_machine_specs() -> MachineSpecs:
     data = {}
 
     data["gpu"] = {"count": 0, "details": []}
     try:
-        nvidia_cmd = run_cmd(
-            "docker run --rm --runtime=nvidia --gpus all ubuntu "
-            "nvidia-smi --query-gpu=name,driver_version,name,memory.total,compute_cap,power.limit,clocks.gr,clocks.mem,uuid,serial --format=csv"
-        )
+        nvidia_cmd = asyncio.run(run_nvidia_smi())
         csv_data = csv.reader(nvidia_cmd.splitlines())
         header = [x.strip() for x in next(csv_data)]
         for row in csv_data:
