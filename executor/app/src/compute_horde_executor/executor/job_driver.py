@@ -149,7 +149,7 @@ class JobDriver:
                     logger.error(f"Job cleanup failed: {e}")
 
     async def _startup_stage(self) -> V0InitialJobRequest:
-        self.specs = get_machine_specs()
+        self.specs = await get_machine_specs()
         await self.run_security_checks_or_fail()
         initial_job_request = await self.miner_client.initial_msg
         await self.runner.prepare_initial(initial_job_request)

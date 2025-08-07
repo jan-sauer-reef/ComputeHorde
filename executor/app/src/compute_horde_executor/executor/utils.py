@@ -57,12 +57,12 @@ async def run_nvidia_smi():
 
 
 @typing.no_type_check
-def get_machine_specs() -> MachineSpecs:
+async def get_machine_specs() -> MachineSpecs:
     data = {}
 
     data["gpu"] = {"count": 0, "details": []}
     try:
-        nvidia_cmd = asyncio.run(run_nvidia_smi())
+        nvidia_cmd = await run_nvidia_smi()
         csv_data = csv.reader(nvidia_cmd.splitlines())
         header = [x.strip() for x in next(csv_data)]
         for row in csv_data:
