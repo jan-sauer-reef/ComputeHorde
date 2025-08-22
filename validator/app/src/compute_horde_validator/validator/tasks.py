@@ -81,7 +81,7 @@ from compute_horde_validator.validator.synthetic_jobs.utils import (
 
 from . import eviction
 from .allowance import tasks  # noqa
-from .clean_me_up import get_single_manifest, save_compute_time_allowance_event
+from .clean_me_up import get_single_manifest, get_single_manifest_http, save_compute_time_allowance_event
 from .dynamic_config import aget_config
 from .models import AdminJobRequest, MetagraphSnapshot, MinerManifest
 from .scoring import create_scoring_engine
@@ -1222,10 +1222,49 @@ async def get_manifests_from_miners(
     timeout: float = 30,
 ) -> dict[str, dict[ExecutorClass, int]]:
     """
-    Connect to multiple miner clients in parallel and retrieve their manifests.
+    Connect to multiple miners in parallel and retrieve their manifests via HTTP.
 
     Args:
-        miner_clients: List of OrganicMinerClient instances to connect to
+        miners: List of Miner instances to connect to
+        timeout: Maximum time to wait for manifest retrieval in seconds
+
+    Returns:
+        Dictionary mapping miner hotkeys to their executor manifests
+    """
+
+    try:
+        logger.info(f"Scraping manifests for {len(miners)} miners")
+        tasks = [
+            asyncio.create_task(
+                get_single_manifest_http(miner.address, miner.port, miner.hotkey, timeout), 
+                name=f"{miner.hotkey}.get_manifest"
+            )
+            for miner in miners
+        ]
+        results = await asyncio.gather(*tasks)
+
+        # Process results and build the manifest dictionary
+        result_manifests = {}
+        for hotkey, manifest in results:
+            if manifest is not None:
+                result_manifests[hotkey] = manifest
+
+        return result_manifests
+
+    except Exception as e:
+        logger.error(f"Error in get_manifests_from_miners: {e}")
+        return {}
+
+
+async def get_manifests_from_miners_websocket(
+    miners: list[Miner],
+    timeout: float = 30,
+) -> dict[str, dict[ExecutorClass, int]]:
+    """
+    Connect to multiple miner clients in parallel and retrieve their manifests via websocket (legacy method).
+
+    Args:
+        miners: List of Miner instances to connect to
         timeout: Maximum time to wait for manifest retrieval in seconds
 
     Returns:

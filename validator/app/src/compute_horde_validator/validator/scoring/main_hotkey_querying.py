@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import aiohttp
 
 from compute_horde.protocol_messages import (
     GenericError,
@@ -64,7 +65,38 @@ async def _query_miners(miners: list[Miner]) -> dict[str, str | None]:
 
 async def _query_single_miner(miner: Miner) -> str | None:
     """
-    Async helper to query a single miner.
+    Async helper to query a single miner via HTTP.
+
+    Args:
+        miner: Miner to query
+
+    Returns:
+        Main hotkey (or None)
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"http://{miner.address}:{miner.port}/v0.1/hotkey"
+            async with asyncio.timeout(10):
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("main_hotkey")
+                    else:
+                        logger.warning(f"HTTP {response.status} from {miner.hotkey}")
+                        return None
+
+    except TimeoutError:
+        logger.warning(f"Timeout querying main hotkey from {miner.hotkey}")
+        return None
+    except Exception as e:
+        logger.warning(f"Error querying main hotkey from {miner.hotkey}: {e}")
+        return None
+
+
+# Legacy websocket-based function (kept for backward compatibility)
+async def _query_single_miner_websocket(miner: Miner) -> str | None:
+    """
+    Async helper to query a single miner via websocket (legacy method).
 
     Args:
         miner: Miner to query
@@ -122,14 +154,16 @@ def _create_auth_message(miner_hotkey: str) -> ValidatorAuthForMiner:
     Returns:
         Authentication message
     """
-    wallet = settings.BITTENSOR_WALLET()
-    hotkey = wallet.get_hotkey()
-
-    msg = ValidatorAuthForMiner(
-        validator_hotkey=hotkey.ss58_address,
+    timestamp = int(time.time())
+    payload = {
+        "validator_hotkey": settings.BITTENSOR_WALLET().get_hotkey().ss58_address,
+        "miner_hotkey": miner_hotkey,
+        "timestamp": timestamp,
+    }
+    signature = sign_blob(payload, settings.BITTENSOR_WALLET().get_hotkey())
+    return ValidatorAuthForMiner(
+        validator_hotkey=settings.BITTENSOR_WALLET().get_hotkey().ss58_address,
         miner_hotkey=miner_hotkey,
-        timestamp=int(time.time()),
-        signature="",
+        timestamp=timestamp,
+        signature=signature,
     )
-    msg.signature = sign_blob(hotkey, msg.blob_for_signing())
-    return msg

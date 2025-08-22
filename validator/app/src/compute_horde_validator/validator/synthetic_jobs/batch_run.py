@@ -83,6 +83,7 @@ from compute_horde_validator.validator.models import (
     SyntheticJobBatch,
     SystemEvent,
 )
+from compute_horde_validator.validator.clean_me_up import get_single_manifest_http
 from compute_horde_validator.validator.synthetic_jobs.generator import current
 from compute_horde_validator.validator.synthetic_jobs.generator.base import (
     BaseSyntheticJobGenerator,
@@ -194,12 +195,9 @@ class MinerClient(AbstractMinerClient[MinerToValidatorMessage, ValidatorToMinerM
             )
             return
 
+        # Note: Manifest is now queried via HTTP, not received via websocket
         if isinstance(msg, V0ExecutorManifestRequest):
-            if self.ctx.manifests[self.miner_hotkey] is None:
-                self.ctx.manifests[self.miner_hotkey] = msg.manifest
-                self.ctx.manifest_events[self.miner_hotkey].set()
-            else:
-                logger.warning("%s duplicate message: %s", self.miner_name, msg.message_type)
+            logger.warning("%s received unexpected manifest message via websocket", self.miner_name)
             return
 
         job_uuid = getattr(msg, "job_uuid", None)
@@ -491,7 +489,7 @@ class BatchContext:
 
     # TODO: now `manifests` and `executors` have similar shape due to the protocol change. Do we still need both?
     manifests: dict[str, dict[ExecutorClass, int] | None]
-    manifest_events: dict[str, asyncio.Event]
+
 
     # randomized, but order preserving list of job.uuid
     # used to go from indices returned by asyncio.gather() back to job.uuid
@@ -865,7 +863,6 @@ async def _init_context(
         job_generators={},
         online_executor_count={},
         manifests={},
-        manifest_events={},
         job_uuids=[],
         jobs={},
         active_validators=active_validators,
@@ -887,7 +884,6 @@ async def _init_context(
         ctx.job_generators[hotkey] = {}
         ctx.online_executor_count[hotkey] = defaultdict(int)
         ctx.manifests[hotkey] = None
-        ctx.manifest_events[hotkey] = asyncio.Event()
 
     return ctx
 
@@ -991,6 +987,7 @@ async def _get_miner_manifest(
     await start_barrier.wait()
 
     client = ctx.clients[miner_hotkey]
+    miner = ctx.miners[miner_hotkey]
 
     async with asyncio.timeout(_GET_MANIFEST_TIMEOUT):
         try:
@@ -1007,7 +1004,16 @@ async def _get_miner_manifest(
             )
             return
 
-        await ctx.manifest_events[miner_hotkey].wait()
+
+        # Get manifest from HTTP endpoint
+        manifest = await get_single_manifest_http(
+            miner.address, miner.port, miner_hotkey, _GET_MANIFEST_TIMEOUT
+        )
+        if manifest[1] is not None:  # manifest[1] is the actual manifest dict
+            ctx.manifests[miner_hotkey] = manifest[1]
+        else:
+            logger.warning("%s failed to get manifest via HTTP", ctx.names[miner_hotkey])
+            return
 
     manifest = ctx.manifests[miner_hotkey]
     assert manifest is not None
