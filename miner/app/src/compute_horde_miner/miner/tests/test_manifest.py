@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
 import pytest
 from django.test import AsyncClient
 
@@ -21,7 +22,7 @@ async def test_get_manifest_success():
         response = await get_manifest(request)
         
         assert response.status_code == 200
-        data = response.json()
+        data = json.loads(response.content)
         assert data["manifest"] == expected_manifest
 
 
@@ -39,7 +40,7 @@ async def test_get_manifest_empty_response():
         response = await get_manifest(request)
         
         assert response.status_code == 200
-        data = response.json()
+        data = json.loads(response.content)
         assert data["manifest"] == {}
 
 
@@ -57,7 +58,7 @@ async def test_get_manifest_exception():
         response = await get_manifest(request)
         
         assert response.status_code == 500
-        data = response.json()
+        data = json.loads(response.content)
         assert "error" in data
         assert "Test error" in data["error"]
 
@@ -77,6 +78,6 @@ async def test_get_manifest_url():
         response = await client.get("/v0.1/manifest")
         
         assert response.status_code == 200
-        data = response.json()
+        data = json.loads(response.content)
         assert data["manifest"] == expected_manifest
 
