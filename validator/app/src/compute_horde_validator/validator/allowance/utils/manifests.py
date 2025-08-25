@@ -5,12 +5,11 @@ import logging
 import operator
 from functools import reduce
 
-from compute_horde.miner_client.organic import OrganicMinerClient
 from compute_horde_core.executor_class import ExecutorClass
 from django.db import transaction
 from django.db.models import Min, Q
 
-from compute_horde_validator.validator.clean_me_up import get_single_manifest, get_single_manifest_http
+from compute_horde_validator.validator.clean_me_up import get_single_manifest
 from compute_horde_validator.validator.locks import Lock, LockType
 
 from ...dynamic_config import get_miner_max_executors_per_class
@@ -191,7 +190,7 @@ async def fetch_manifests_from_miners(
         logger.info(f"Scraping manifests for {len(miners)} miners")
         tasks = [
             asyncio.create_task(
-                get_single_manifest_http(
+                get_single_manifest(
                     miner_address=miner[1],
                     miner_port=miner[2],
                     miner_hotkey=miner[0],
@@ -215,49 +214,3 @@ async def fetch_manifests_from_miners(
     except Exception as e:
         logger.error(f"Error in fetch_manifests_from_miners: {e}")
         return {}
-
-
-async def fetch_manifests_from_miners_websocket(
-    miners: list[tuple[ss58_address, str, int]],
-) -> dict[tuple[ss58_address, ExecutorClass], int]:
-    """Only includes results for miners that have replied successfully (legacy websocket method)."""
-
-    my_keypair = supertensor().wallet().get_hotkey()
-
-    miner_clients = [
-        OrganicMinerClient(
-            miner_hotkey=miner[0],
-            miner_address=miner[1],
-            miner_port=miner[2],
-            job_uuid="ignore",
-            my_keypair=my_keypair,
-        )
-        for miner in miners
-    ]
-
-    try:
-        logger.info(f"Scraping manifests for {len(miner_clients)} miners")
-        tasks = [
-            asyncio.create_task(
-                get_single_manifest(client, settings.MANIFEST_FETCHING_TIMEOUT),
-                name=f"{client.miner_hotkey}.get_manifest",
-            )
-            for client in miner_clients
-        ]
-        results = await asyncio.gather(*tasks)
-
-        # Process results and build the manifest dictionary
-        result_manifests = {}
-        for hotkey, manifest in results:
-            for executor_class in ExecutorClass:
-                if manifest is not None:
-                    result_manifests[hotkey, executor_class] = manifest.get(executor_class, 0)
-
-        return result_manifests
-
-    finally:
-        close_tasks = [
-            asyncio.create_task(client.close(), name=f"{client.miner_hotkey}.close")
-            for client in miner_clients
-        ]
-        await asyncio.gather(*close_tasks, return_exceptions=True)

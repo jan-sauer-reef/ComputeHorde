@@ -210,8 +210,6 @@ class MinerValidatorConsumer(BaseConsumer[ValidatorToMinerMessage], ValidatorInt
 
         self.validator_authenticated = True
 
-        # (!) We should not send any messages until the validator authorizes itself.
-
         # Handle messages that may have arrived during the authentication
         for msg in self.msg_queue:
             await self.handle(msg)

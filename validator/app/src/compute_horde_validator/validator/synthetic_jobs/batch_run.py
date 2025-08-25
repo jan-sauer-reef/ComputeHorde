@@ -83,7 +83,7 @@ from compute_horde_validator.validator.models import (
     SyntheticJobBatch,
     SystemEvent,
 )
-from compute_horde_validator.validator.clean_me_up import get_single_manifest_http
+from compute_horde_validator.validator.clean_me_up import get_single_manifest
 from compute_horde_validator.validator.synthetic_jobs.generator import current
 from compute_horde_validator.validator.synthetic_jobs.generator.base import (
     BaseSyntheticJobGenerator,
@@ -986,37 +986,15 @@ async def _get_miner_manifest(
 ) -> None:
     await start_barrier.wait()
 
-    client = ctx.clients[miner_hotkey]
     miner = ctx.miners[miner_hotkey]
-
-    async with asyncio.timeout(_GET_MANIFEST_TIMEOUT):
-        try:
-            await client.connect()
-        except TransportConnectionError as exc:
-            name = ctx.names[miner_hotkey]
-            logger.warning("%s connection error: %r", name, exc)
-            ctx.system_event(
-                type=SystemEvent.EventType.MINER_SYNTHETIC_JOB_FAILURE,
-                subtype=SystemEvent.EventSubType.MINER_CONNECTION_ERROR,
-                description=repr(exc),
-                miner_hotkey=miner_hotkey,
-                func="connect",
-            )
-            return
-
-
-        # Get manifest from HTTP endpoint
-        manifest = await get_single_manifest_http(
-            miner.address, miner.port, miner_hotkey, _GET_MANIFEST_TIMEOUT
-        )
-        if manifest[1] is not None:  # manifest[1] is the actual manifest dict
-            ctx.manifests[miner_hotkey] = manifest[1]
-        else:
-            logger.warning("%s failed to get manifest via HTTP", ctx.names[miner_hotkey])
-            return
-
-    manifest = ctx.manifests[miner_hotkey]
+    _, manifest = await get_single_manifest(
+        miner_address=miner.address,
+        miner_port=miner.port,
+        miner_hotkey=miner_hotkey,
+        timeout=_GET_MANIFEST_TIMEOUT,
+    )
     assert manifest is not None
+    ctx.manifests[miner_hotkey] = manifest
 
     executors = ctx.executors[miner_hotkey]
     for executor_class, count in manifest.items():
