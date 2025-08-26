@@ -1232,38 +1232,29 @@ async def get_manifests_from_miners(
         Dictionary mapping miner hotkeys to their executor manifests
     """
 
-    miner_clients = [
-        OrganicMinerClient(
-            miner_hotkey=miner.hotkey,
-            miner_address=miner.address,
-            miner_port=miner.port,
-            job_uuid="ignore",
-            my_keypair=get_keypair(),
+    logger.info(f"Scraping manifests for {len(miners)} miners")
+    tasks = [
+        asyncio.create_task(
+            get_single_manifest(
+                address=miner.address,
+                port=miner.port,
+                hotkey=miner.hotkey,
+                timeout=timeout,
+            ),
+            name=f"{miner.hotkey}.get_manifest"
         )
         for miner in miners
     ]
+    results = await asyncio.gather(*tasks)
 
-    try:
-        logger.info(f"Scraping manifests for {len(miners)} miners")
-        tasks = [
-            asyncio.create_task(
-                get_single_manifest(client, timeout), name=f"{client.miner_hotkey}.get_manifest"
-            )
-            for client in miner_clients
-        ]
-        results = await asyncio.gather(*tasks)
+    # Process results and build the manifest dictionary
+    result_manifests = {}
+    for hotkey, manifest in results:
+        if manifest is not None:
+            result_manifests[hotkey] = manifest
 
-        # Process results and build the manifest dictionary
-        result_manifests = {}
-        for hotkey, manifest in results:
-            if manifest is not None:
-                result_manifests[hotkey] = manifest
+    return result_manifests
 
-        return result_manifests
-
-    except Exception as e:
-        logger.error(f"Error in get_manifests_from_miners: {e}")
-        return {}
 
 
 @app.task

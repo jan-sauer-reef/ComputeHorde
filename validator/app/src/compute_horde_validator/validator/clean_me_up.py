@@ -24,15 +24,14 @@ async def save_compute_time_allowance_event(subtype, msg, data):
 
 
 async def get_single_manifest(
-    client: OrganicMinerClient, timeout: float = 30
+    address: str, port: int, hotkey: str, timeout: float = 30
 ) -> tuple[str, dict[ExecutorClass, int] | None]:
     """Get manifest from a single miner via HTTP"""
-    hotkey = client.miner_hotkey
     data = {"hotkey": hotkey}
     try:
         async with asyncio.timeout(timeout):
             async with aiohttp.ClientSession() as session:
-                url = f"http://{client.miner_address}:{client.miner_port}/v0.1/manifest"
+                url = f"http://{address}:{port}/v0.1/manifest"
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
