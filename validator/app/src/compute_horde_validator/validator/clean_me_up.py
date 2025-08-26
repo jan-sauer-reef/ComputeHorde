@@ -25,20 +25,19 @@ async def get_single_manifest(
     address: str, port: int, hotkey: str, timeout: float = 30
 ) -> tuple[str, dict[ExecutorClass, int] | None]:
     """Get manifest from a single miner via HTTP"""
-    data = {"hotkey": hotkey}
     try:
         async with asyncio.timeout(timeout):
             async with aiohttp.ClientSession() as session:
                 url = f"http://{address}:{port}/v0.1/manifest"
                 async with await session.get(url) as response:
-                    data = await response.json()
+                    response_json = await response.json()
                     if response.status == 200:
-                        manifest = data.get("manifest", {})
+                        manifest = response_json.get("manifest", {})
                         return hotkey, manifest
                     else:
                         msg = f"HTTP {response.status} fetching manifest for {hotkey}"
                         await save_compute_time_allowance_event(
-                            SystemEvent.EventSubType.MANIFEST_ERROR, msg, data=data
+                            SystemEvent.EventSubType.MANIFEST_ERROR, msg, data={"hotkey": hotkey}
                         )
                         logger.warning(msg)
                         return hotkey, None
@@ -48,7 +47,7 @@ async def get_single_manifest(
         await save_compute_time_allowance_event(
             SystemEvent.EventSubType.MANIFEST_TIMEOUT,
             msg,
-            data,
+            {"hotkey": hotkey},
         )
         logger.warning(msg)
         return hotkey, None
@@ -58,7 +57,7 @@ async def get_single_manifest(
         await save_compute_time_allowance_event(
             SystemEvent.EventSubType.MANIFEST_ERROR,
             msg,
-            data,
+            {"hotkey": hotkey},
         )
         logger.warning(msg)
         return hotkey, None
