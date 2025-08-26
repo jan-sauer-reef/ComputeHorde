@@ -2,8 +2,6 @@ import asyncio
 import aiohttp
 
 from celery.utils.log import get_task_logger
-from compute_horde.miner_client.organic import OrganicMinerClient
-from compute_horde.protocol_messages import V0ExecutorManifestRequest
 from compute_horde_core.executor_class import ExecutorClass
 from django.conf import settings
 
@@ -32,10 +30,10 @@ async def get_single_manifest(
         async with asyncio.timeout(timeout):
             async with aiohttp.ClientSession() as session:
                 url = f"http://{address}:{port}/v0.1/manifest"
-                async with session.get(url) as response:
+                async with await session.get(url) as response:
+                    data = await response.json()
                     if response.status == 200:
-                        data = await response.json()
-                        manifest = V0ExecutorManifestRequest(manifest=data.get("manifest", {}))
+                        manifest = data.get("manifest", {})
                         return hotkey, manifest
                     else:
                         msg = f"HTTP {response.status} fetching manifest for {hotkey}"

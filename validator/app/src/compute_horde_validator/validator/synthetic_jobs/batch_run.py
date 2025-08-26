@@ -992,8 +992,8 @@ async def _get_miner_manifest(
         async with aiohttp.ClientSession() as session:
             url = f"http://{miner.address}:{miner.port}/v0.1/manifest"
             async with session.get(url) as response:
+                data = await response.json()
                 if response.status == 200:
-                    data = await response.json()
                     manifest = V0ExecutorManifestRequest(manifest=data.get("manifest", {}))
                 else:
                     name = ctx.names[miner_hotkey]
