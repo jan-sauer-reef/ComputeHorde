@@ -1,3 +1,4 @@
+import aiohttp
 import asyncio
 import logging
 import math
@@ -83,7 +84,6 @@ from compute_horde_validator.validator.models import (
     SyntheticJobBatch,
     SystemEvent,
 )
-from compute_horde_validator.validator.clean_me_up import get_single_manifest
 from compute_horde_validator.validator.synthetic_jobs.generator import current
 from compute_horde_validator.validator.synthetic_jobs.generator.base import (
     BaseSyntheticJobGenerator,
@@ -987,13 +987,29 @@ async def _get_miner_manifest(
     await start_barrier.wait()
 
     miner = ctx.miners[miner_hotkey]
-    _, manifest = await get_single_manifest(
-        miner_address=miner.address,
-        miner_port=miner.port,
-        miner_hotkey=miner_hotkey,
-        timeout=_GET_MANIFEST_TIMEOUT,
-    )
-    assert manifest is not None
+
+    async with asyncio.timeout(_GET_MANIFEST_TIMEOUT):
+        async with aiohttp.ClientSession() as session:
+            url = f"http://{miner.address}:{miner.port}/v0.1/manifest"
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    manifest = V0ExecutorManifestRequest(manifest=data.get("manifest", {}))
+                else:
+                    name = ctx.names[miner_hotkey]
+                    data = await response.json()
+                    logger.warning(
+                        "%s HTTP connection error (%s): %s", name, response.status, data["error"]
+                    )
+                    ctx.system_event(
+                        type=SystemEvent.EventType.MINER_SYNTHETIC_JOB_FAILURE,
+                        subtype=SystemEvent.EventSubType.MINER_CONNECTION_ERROR,
+                        description=repr(exc),
+                        miner_hotkey=miner_hotkey,
+                        func="connect",
+                    )
+                    return
+
     ctx.manifests[miner_hotkey] = manifest
 
     executors = ctx.executors[miner_hotkey]

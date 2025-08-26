@@ -5,6 +5,7 @@ import logging
 import operator
 from functools import reduce
 
+from compute_horde.miner_client.organic import OrganicMinerClient
 from compute_horde_core.executor_class import ExecutorClass
 from django.db import transaction
 from django.db.models import Min, Q
@@ -186,19 +187,27 @@ async def fetch_manifests_from_miners(
 ) -> dict[tuple[ss58_address, ExecutorClass], int]:
     """Only includes results for miners that have replied successfully."""
 
+    my_keypair = supertensor().wallet().get_hotkey()
+
+    miner_clients = [
+        OrganicMinerClient(
+            miner_hotkey=miner[0],
+            miner_address=miner[1],
+            miner_port=miner[2],
+            job_uuid="ignore",
+            my_keypair=my_keypair,
+        )
+        for miner in miners
+    ]
+
     try:
         logger.info(f"Scraping manifests for {len(miners)} miners")
         tasks = [
             asyncio.create_task(
-                get_single_manifest(
-                    miner_address=miner[1],
-                    miner_port=miner[2],
-                    miner_hotkey=miner[0],
-                    timeout=settings.MANIFEST_FETCHING_TIMEOUT
-                ),
-                name=f"{miner[0]}.get_manifest",
+                get_single_manifest(client, timeout=settings.MANIFEST_FETCHING_TIMEOUT),
+                name=f"{client.miner_hotkey}.get_manifest",
             )
-            for miner in miners
+            for client in miner_clients
         ]
         results = await asyncio.gather(*tasks)
 

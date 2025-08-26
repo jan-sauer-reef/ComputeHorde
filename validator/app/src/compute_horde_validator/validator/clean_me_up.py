@@ -2,6 +2,8 @@ import asyncio
 import aiohttp
 
 from celery.utils.log import get_task_logger
+from compute_horde.miner_client.organic import OrganicMinerClient
+from compute_horde.protocol_messages import V0ExecutorManifestRequest
 from compute_horde_core.executor_class import ExecutorClass
 from django.conf import settings
 
@@ -22,44 +24,45 @@ async def save_compute_time_allowance_event(subtype, msg, data):
 
 
 async def get_single_manifest(
-    miner_address: str, miner_port: int, miner_hotkey: str, timeout: float = 30
+    client: OrganicMinerClient, timeout: float = 30
 ) -> tuple[str, dict[ExecutorClass, int] | None]:
     """Get manifest from a single miner via HTTP"""
-    data = {"hotkey": miner_hotkey}
+    hotkey = client.miner_hotkey
+    data = {"hotkey": hotkey}
     try:
         async with asyncio.timeout(timeout):
             async with aiohttp.ClientSession() as session:
-                url = f"http://{miner_address}:{miner_port}/v0.1/manifest"
+                url = f"http://{client.miner_address}:{client.miner_port}/v0.1/manifest"
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.json()
-                        manifest = data.get("manifest", {})
-                        return miner_hotkey, manifest
+                        manifest = V0ExecutorManifestRequest(manifest=data.get("manifest", {}))
+                        return hotkey, manifest
                     else:
-                        msg = f"HTTP {response.status} fetching manifest for {miner_hotkey}"
+                        msg = f"HTTP {response.status} fetching manifest for {hotkey}"
                         await save_compute_time_allowance_event(
                             SystemEvent.EventSubType.MANIFEST_ERROR, msg, data=data
                         )
                         logger.warning(msg)
-                        return miner_hotkey, None
+                        return hotkey, None
 
     except TimeoutError:
-        msg = f"Timeout fetching manifest for {miner_hotkey}"
+        msg = f"Timeout fetching manifest for {hotkey}"
         await save_compute_time_allowance_event(
             SystemEvent.EventSubType.MANIFEST_TIMEOUT,
             msg,
             data,
         )
         logger.warning(msg)
-        return miner_hotkey, None
+        return hotkey, None
 
     except Exception as exc:
-        msg = f"Failed to fetch manifest for {miner_hotkey}: {exc}"
+        msg = f"Failed to fetch manifest for {hotkey}: {exc}"
         await save_compute_time_allowance_event(
             SystemEvent.EventSubType.MANIFEST_ERROR,
             msg,
             data,
         )
         logger.warning(msg)
-        return miner_hotkey, None
+        return hotkey, None
 

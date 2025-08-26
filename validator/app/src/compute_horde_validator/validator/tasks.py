@@ -1232,14 +1232,24 @@ async def get_manifests_from_miners(
         Dictionary mapping miner hotkeys to their executor manifests
     """
 
+    miner_clients = [
+        OrganicMinerClient(
+            miner_hotkey=miner.hotkey,
+            miner_address=miner.address,
+            miner_port=miner.port,
+            job_uuid="ignore",
+            my_keypair=get_keypair(),
+        )
+        for miner in miners
+    ]
+
     try:
         logger.info(f"Scraping manifests for {len(miners)} miners")
         tasks = [
             asyncio.create_task(
-                get_single_manifest(miner.address, miner.port, miner.hotkey, timeout), 
-                name=f"{miner.hotkey}.get_manifest"
+                get_single_manifest(client, timeout), name=f"{client.miner_hotkey}.get_manifest"
             )
-            for miner in miners
+            for client in miner_clients
         ]
         results = await asyncio.gather(*tasks)
 
