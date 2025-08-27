@@ -77,12 +77,13 @@ def create_mock_http_session(manifest: dict, wait_before: int = 0):
             return None
     
     class MockSession:
-        def __init__(self, manifest):
+        def __init__(self, manifest, wait_before):
             self.manifest = manifest
-            self.wait_before = wait_before
+            self.wait_before = int(wait_before)
         
         async def get(self, url):
-            await asyncio.sleep(self.wait_before)
+            if self.wait_before > 0:
+                await asyncio.sleep(self.wait_before)
             return MockResponse(200, {"manifest": self.manifest})
         
         async def __aenter__(self):
@@ -91,7 +92,7 @@ def create_mock_http_session(manifest: dict, wait_before: int = 0):
         async def __aexit__(self, exc_type, exc_val, exc_tb):
             return None
     
-    return MockSession(manifest)
+    return MockSession(manifest, wait_before)
 
 
 @asynccontextmanager

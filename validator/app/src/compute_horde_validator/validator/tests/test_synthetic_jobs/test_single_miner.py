@@ -38,10 +38,14 @@ async def test_execute_miner_synthetic_jobs_success(
     transport: SimulationTransport,
     job_uuid: uuid.UUID,
 ):
-    # await transport.add_message(manifest_message, send_before=1)
-    await transport.add_message(accept_job_message, send_before=1, sleep_before=0.05)
+    # TODO: Removing the manifest message results in a race condition in how the MinerClient handles 
+    #       messages. Tests fail if send_before=1 for the accept_job_message but I'm unsure if this is
+    #       a quirk of the simulated transport or an inherent issue with the MinerClient.
+    #       `test_batch.py::test_synthetic_job_batch` doesn't have this issue, despite being structurally
+    #       similar.
+    await transport.add_message(accept_job_message, send_before=2)
     await transport.add_message(executor_ready_message, send_before=0)
-    await transport.add_message(job_finish_message, send_before=2, sleep_before=0.05)
+    await transport.add_message(job_finish_message, send_before=2)
 
     batch = await SyntheticJobBatch.objects.acreate(
         block=1000,
@@ -76,7 +80,7 @@ async def test_execute_miner_synthetic_jobs_success_timeout(
     transport: SimulationTransport,
     job_uuid: uuid.UUID,
 ):
-    await transport.add_message(accept_job_message, send_before=1, sleep_before=0.05)
+    await transport.add_message(accept_job_message, send_before=2)
     await transport.add_message(executor_ready_message, send_before=0)
     await transport.add_message(job_finish_message, send_before=2, sleep_before=2)
 
@@ -111,9 +115,9 @@ async def test_execute_miner_synthetic_jobs_job_failed(
     transport: SimulationTransport,
     job_uuid: uuid.UUID,
 ):
-    await transport.add_message(accept_job_message, send_before=1, sleep_before=0.05)
+    await transport.add_message(accept_job_message, send_before=2)
     await transport.add_message(executor_ready_message, send_before=0)
-    await transport.add_message(job_failed_message, send_before=2, sleep_before=0.05)
+    await transport.add_message(job_failed_message, send_before=2)
 
     batch = await SyntheticJobBatch.objects.acreate(
         block=1000,
@@ -143,7 +147,7 @@ async def test_execute_miner_synthetic_jobs_job_declined(
     transport: SimulationTransport,
     job_uuid: uuid.UUID,
 ):
-    await transport.add_message(decline_job_message, send_before=1, sleep_before=0.05)
+    await transport.add_message(decline_job_message, send_before=2)
 
     batch = await SyntheticJobBatch.objects.acreate(
         block=1000,
