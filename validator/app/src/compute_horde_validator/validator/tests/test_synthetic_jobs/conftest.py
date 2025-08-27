@@ -2,12 +2,10 @@ import uuid
 
 import pytest
 import pytest_asyncio
-from compute_horde.executor_class import DEFAULT_EXECUTOR_CLASS, DEFAULT_LLM_EXECUTOR_CLASS
 from compute_horde.miner_client.base import AbstractTransport
 from compute_horde.protocol_messages import (
     V0AcceptJobRequest,
     V0DeclineJobRequest,
-    V0ExecutorManifestRequest,
     V0ExecutorReadyRequest,
     V0JobFailedRequest,
     V0JobFinishedRequest,
@@ -90,16 +88,6 @@ def _patch_generator_factory(
         "compute_horde_validator.validator.synthetic_jobs.generator.current.synthetic_job_generator_factory",
         job_generator_factory,
     )
-
-
-@pytest.fixture
-def manifest_message():
-    return V0ExecutorManifestRequest(manifest={DEFAULT_EXECUTOR_CLASS: 1}).model_dump_json()
-
-
-@pytest.fixture
-def streaming_manifest_message():
-    return V0ExecutorManifestRequest(manifest={DEFAULT_LLM_EXECUTOR_CLASS: 1}).model_dump_json()
 
 
 @pytest.fixture
