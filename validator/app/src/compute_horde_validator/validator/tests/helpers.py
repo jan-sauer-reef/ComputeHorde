@@ -4,6 +4,7 @@ import numbers
 import os
 import shlex
 import subprocess
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
 from time import monotonic
@@ -29,6 +30,7 @@ from constance.base import Config
 from django.conf import settings
 from pydantic import TypeAdapter
 
+from compute_horde_core.executor_class import ExecutorClass
 from compute_horde_validator.validator.models import SystemEvent
 from compute_horde_validator.validator.organic_jobs.miner_client import MinerClient
 from compute_horde_validator.validator.synthetic_jobs import batch_run
@@ -55,6 +57,46 @@ def get_miner_client(MINER_CLIENT, job_uuid: str) -> MinerClient:
         job_uuid=job_uuid,
         my_keypair=get_keypair(),
     )
+
+
+def create_mock_http_session(manifest: dict):
+    """Create a mock HTTP session for testing."""
+    class MockResponse:
+        def __init__(self, status, data):
+            self.status = status
+            self._data = data
+        
+        async def json(self):
+            return self._data
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+    
+    class MockSession:
+        def __init__(self, manifest):
+            self.manifest = manifest
+        
+        async def get(self, url):
+            return MockResponse(200, {"manifest": self.manifest})
+        
+        async def __aenter__(self):
+            return self
+        
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            return None
+    
+    return MockSession(manifest)
+
+
+@asynccontextmanager
+async def mock_aiohttp_client_session(manifest: dict[ExecutorClass, int]):
+    """Context manager for mocking aiohttp.ClientSession."""
+    mock_session = create_mock_http_session(manifest)
+    with mock.patch("aiohttp.ClientSession", return_value=mock_session):
+        yield
 
 
 class MockAxonInfo:
