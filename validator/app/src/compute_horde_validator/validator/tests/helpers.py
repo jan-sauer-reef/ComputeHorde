@@ -1,3 +1,4 @@
+import asyncio
 import glob
 import logging
 import numbers
@@ -59,7 +60,7 @@ def get_miner_client(MINER_CLIENT, job_uuid: str) -> MinerClient:
     )
 
 
-def create_mock_http_session(manifest: dict):
+def create_mock_http_session(manifest: dict, wait_before: int = 0):
     """Create a mock HTTP session for testing."""
     class MockResponse:
         def __init__(self, status, data):
@@ -78,8 +79,10 @@ def create_mock_http_session(manifest: dict):
     class MockSession:
         def __init__(self, manifest):
             self.manifest = manifest
+            self.wait_before = wait_before
         
         async def get(self, url):
+            await asyncio.sleep(self.wait_before)
             return MockResponse(200, {"manifest": self.manifest})
         
         async def __aenter__(self):
@@ -92,9 +95,9 @@ def create_mock_http_session(manifest: dict):
 
 
 @asynccontextmanager
-async def mock_aiohttp_client_session(manifest: dict[ExecutorClass, int]):
+async def mock_aiohttp_client_session(manifest: dict[ExecutorClass, int], wait_before: int = 0):
     """Context manager for mocking aiohttp.ClientSession."""
-    mock_session = create_mock_http_session(manifest)
+    mock_session = create_mock_http_session(manifest=manifest, wait_before=wait_before)
     with mock.patch("aiohttp.ClientSession", return_value=mock_session):
         yield
 

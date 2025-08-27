@@ -175,7 +175,7 @@ async def test_execute_miner_synthetic_jobs_no_manifest(
         block=1000,
         cycle=await Cycle.objects.acreate(start=708, stop=1430),
     )
-    async with mock_aiohttp_client_session(None):
+    async with mock_aiohttp_client_session({}, wait_before=10):
         await asyncio.wait_for(
             execute_synthetic_batch_run(
                 [miner],
