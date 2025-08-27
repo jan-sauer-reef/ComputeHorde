@@ -85,7 +85,7 @@ def create_mock_http_session(miner_configs: list[MinerConfig]):
 
 @asynccontextmanager
 async def mock_organic_miner_client(miner_configs: list[MinerConfig]):
-    """Context manager for mocking OrganicMinerClient with transport map."""
+    """Context manager for mocking the HTTP views for miners."""
     mock_session = create_mock_http_session(miner_configs)
     with patch("aiohttp.ClientSession", return_value=mock_session):
         yield
