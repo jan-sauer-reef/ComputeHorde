@@ -31,6 +31,7 @@ pytestmark = [
 
 async def test_execute_miner_synthetic_jobs_success(
     miner: Miner,
+    manifest_message: str,
     executor_ready_message: str,
     accept_job_message: str,
     job_finish_message: str,
@@ -38,11 +39,6 @@ async def test_execute_miner_synthetic_jobs_success(
     transport: SimulationTransport,
     job_uuid: uuid.UUID,
 ):
-    # TODO: Removing the manifest message results in a race condition in how the MinerClient handles 
-    #       messages. Tests fail if send_before=1 for the accept_job_message but I'm unsure if this is
-    #       a quirk of the simulated transport or an inherent issue with the MinerClient.
-    #       `test_batch.py::test_synthetic_job_batch` doesn't have this issue, despite being structurally
-    #       similar.
     await transport.add_message(accept_job_message, send_before=2)
     await transport.add_message(executor_ready_message, send_before=0)
     await transport.add_message(job_finish_message, send_before=2)
@@ -51,7 +47,7 @@ async def test_execute_miner_synthetic_jobs_success(
         block=1000,
         cycle=await Cycle.objects.acreate(start=708, stop=1430),
     )
-    async with mock_aiohttp_client_session({DEFAULT_EXECUTOR_CLASS: 1}):
+    async with mock_aiohttp_client_session(manifest_message):
         await asyncio.wait_for(
             execute_synthetic_batch_run(
                 [miner],
@@ -73,6 +69,7 @@ async def test_execute_miner_synthetic_jobs_success(
 )
 async def test_execute_miner_synthetic_jobs_success_timeout(
     miner: Miner,
+    manifest_message: str,
     executor_ready_message: str,
     accept_job_message: str,
     job_finish_message: str,
@@ -88,7 +85,7 @@ async def test_execute_miner_synthetic_jobs_success_timeout(
         block=1000,
         cycle=await Cycle.objects.acreate(start=708, stop=1430),
     )
-    async with mock_aiohttp_client_session({DEFAULT_EXECUTOR_CLASS: 1}):
+    async with mock_aiohttp_client_session(manifest_message):
         await asyncio.wait_for(
             execute_synthetic_batch_run(
                 [miner],
@@ -108,6 +105,7 @@ async def test_execute_miner_synthetic_jobs_success_timeout(
 
 async def test_execute_miner_synthetic_jobs_job_failed(
     miner: Miner,
+    manifest_message: str,
     executor_ready_message: str,
     accept_job_message: str,
     job_failed_message: str,
@@ -123,7 +121,7 @@ async def test_execute_miner_synthetic_jobs_job_failed(
         block=1000,
         cycle=await Cycle.objects.acreate(start=708, stop=1430),
     )
-    async with mock_aiohttp_client_session({DEFAULT_EXECUTOR_CLASS: 1}):
+    async with mock_aiohttp_client_session(manifest_message):
         await asyncio.wait_for(
             execute_synthetic_batch_run(
                 [miner],
@@ -142,6 +140,7 @@ async def test_execute_miner_synthetic_jobs_job_failed(
 
 async def test_execute_miner_synthetic_jobs_job_declined(
     miner: Miner,
+    manifest_message: str,
     decline_job_message: str,
     create_simulation_miner_client: Callable,
     transport: SimulationTransport,
@@ -153,7 +152,7 @@ async def test_execute_miner_synthetic_jobs_job_declined(
         block=1000,
         cycle=await Cycle.objects.acreate(start=708, stop=1430),
     )
-    async with mock_aiohttp_client_session({DEFAULT_EXECUTOR_CLASS: 1}):
+    async with mock_aiohttp_client_session(manifest_message):
         await asyncio.wait_for(
             execute_synthetic_batch_run(
                 [miner],

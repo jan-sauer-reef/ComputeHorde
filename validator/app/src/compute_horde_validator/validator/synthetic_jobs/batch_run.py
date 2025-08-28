@@ -196,6 +196,7 @@ class MinerClient(AbstractMinerClient[MinerToValidatorMessage, ValidatorToMinerM
             return
 
         # Note: Manifest is now queried via HTTP, not received via websocket
+        # TODO: Remove this once development is done
         if isinstance(msg, V0ExecutorManifestRequest):
             logger.warning("%s received unexpected manifest message via websocket", self.miner_name)
             return
