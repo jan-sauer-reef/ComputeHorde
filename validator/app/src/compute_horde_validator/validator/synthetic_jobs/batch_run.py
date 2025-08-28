@@ -491,7 +491,6 @@ class BatchContext:
     # TODO: now `manifests` and `executors` have similar shape due to the protocol change. Do we still need both?
     manifests: dict[str, dict[ExecutorClass, int] | None]
 
-
     # randomized, but order preserving list of job.uuid
     # used to go from indices returned by asyncio.gather() back to job.uuid
     job_uuids: list[str]
