@@ -5,7 +5,7 @@ import bittensor_wallet
 from compute_horde.test_wallet import (
     VALIDATOR_WALLET_HOTKEY,
     VALIDATOR_WALLET_NAME,
-    get_validator_wallet,
+    get_test_validator_wallet,
 )
 
 os.environ.update(
@@ -31,7 +31,7 @@ STATS_COLLECTOR_URL = "http://fakehost:8000"
 
 
 def BITTENSOR_WALLET() -> bittensor_wallet.Wallet:
-    return get_validator_wallet()
+    return get_test_validator_wallet()
 
 
 DEFAULT_ADMIN_PASSWORD = "fake_admin_password"
@@ -49,3 +49,5 @@ CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 CONSTANCE_DATABASE_CACHE_BACKEND = None
 
 DEBUG_MINER_KEY = None
+
+COMPUTE_HORDE_BLOCK_CACHE_KEY = "test-block-cache-key"
