@@ -151,7 +151,6 @@ class Test(ActiveSubnetworkBaseTest):
                     }
                 )
             )
-            # Note: Manifest is now queried via HTTP endpoint, not sent automatically during websocket authentication
 
             receipt_payload = {
                 "job_uuid": job_uuid,
