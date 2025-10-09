@@ -121,3 +121,6 @@ class WSTransport(AbstractTransport):
             except (websockets.WebSocketException, OSError):
                 logger.info(f"Could not receive msg from {self.name}. Reconnecting...")
                 await self.connect()
+
+    def is_connected(self) -> bool:
+        return self._ws and self._ws.state is websockets.State.OPEN

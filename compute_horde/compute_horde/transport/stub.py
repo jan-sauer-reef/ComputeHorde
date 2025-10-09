@@ -26,3 +26,6 @@ class StubTransport(AbstractTransport):
             return next(self.messages)
         except StopIteration:
             await asyncio.Future()
+    
+    def is_connected(self) -> bool:
+        return True

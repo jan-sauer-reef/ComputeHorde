@@ -29,6 +29,10 @@ class AbstractTransport(abc.ABC):
     async def stop(self) -> None:
         pass
 
+    @abc.abstractmethod
+    def is_connected(self) -> bool:
+        pass
+
     def __aiter__(self):
         return self
 
