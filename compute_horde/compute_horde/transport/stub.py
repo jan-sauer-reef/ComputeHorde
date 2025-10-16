@@ -14,7 +14,10 @@ class StubTransport(AbstractTransport):
         self.messages = iter(messages)
         self.sent_messages: list[str] = []
 
-    async def start(self): ...
+    def is_connected(self) -> bool:
+        return True
+
+    async def start(self, **kwargs): ...
 
     async def stop(self): ...
 
@@ -26,6 +29,3 @@ class StubTransport(AbstractTransport):
             return next(self.messages)
         except StopIteration:
             await asyncio.Future()
-    
-    def is_connected(self) -> bool:
-        return True

@@ -22,15 +22,15 @@ class AbstractTransport(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def start(self) -> None:
+    def is_connected(self) -> bool:
+        pass
+
+    @abc.abstractmethod
+    async def start(self, **kwargs) -> None:
         pass
 
     @abc.abstractmethod
     async def stop(self) -> None:
-        pass
-
-    @abc.abstractmethod
-    def is_connected(self) -> bool:
         pass
 
     def __aiter__(self):
