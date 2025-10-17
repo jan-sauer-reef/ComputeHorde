@@ -52,15 +52,9 @@ class ConnectionManager:
         self.transport_layer = transport_layer
         self.keypair = keypair
         self._stop_event = asyncio.Event()
+        self._cleanup_event = asyncio.Event()
         self._main_task: asyncio.Task | None = None
         self._http_client = httpx.AsyncClient() | None = None
-
-    def is_running(self) -> bool:
-        return (
-            not self._stop_event.is_set() and
-            self._main_task is not None and
-            not self._main_task.done()
-        )
 
     @tenacity.retry(
         stop=tenacity.stop_after_delay(RECONNECT_TIMEOUT),
@@ -138,15 +132,35 @@ class ConnectionManager:
     async def _disconnect_transport_layer(self):
         await self.transport_layer.stop()
 
-
-    async def start(self):
-        if self.is_running():
+    async def _cleanup_resources(self):
+        """
+        Clean up resources. This method is idempotent and can be called multiple times.
+        """
+        if self._cleanup_event.is_set():
             return
+        
+        self._cleanup_event.set()
+        
+        if self._http_client is not None:
+            try:
+                await asyncio.wait_for(self._http_client.aclose(), timeout=self.STOP_TIMEOUT)
+            except asyncio.TimeoutError:
+                # If the HTTP client can't close then we'll have to hope that Python 
+                # will clean up any remaining resources in the background
+                pass
+            except Exception as exc:
+                logger.warning("Error closing HTTP client: %s: %s", type(exc).__name__, exc)
+            finally:
+                self._http_client = None
 
-        self._stop_event.clear()
-        await self._connect_transport_layer()
-        self._main_task = asyncio.create_task(self._monitor_connection())
-        await self._main_task
+        try:
+            await asyncio.wait_for(self._disconnect_transport_layer(), timeout=self.STOP_TIMEOUT)
+        except asyncio.TimeoutError:
+            # If the transport layer can't be stopped from this end then the facilitator will 
+            # hopefully clean up the connection
+            pass
+        except Exception as exc:
+            logger.warning("Error disconnecting transport layer: %s: %s", type(exc).__name__, exc)
 
     async def _monitor_connection(self):
         """
@@ -168,8 +182,28 @@ class ConnectionManager:
         except Exception as exc:
             logger.error("Error monitoring connection: %s: %s", type(exc).__name__, exc)
             raise
-                        
+        finally:
+            await self._cleanup_resources()
+
+    def is_running(self) -> bool:
+        return not self._stop_event.is_set()
+
+    async def start(self):
+        if self.is_running():
+            return
+
+        self._cleanup_event.clear()
+        self._stop_event.clear()
+        await self._connect_transport_layer()
+        self._main_task = asyncio.create_task(self._monitor_connection())
+
     async def stop(self):
+        """
+        Stop the connection manager main loop and clean up resources.
+
+        All exceptions are logged and ignored to ensure that no cleanup step is
+        skipped.
+        """
         if not self.is_running():
             return
         
@@ -182,12 +216,7 @@ class ConnectionManager:
             except asyncio.TimeoutError:
                 self._main_task.cancel()
                 await self._main_task
-        
-        # Clean up transport layer
-        await self._disconnect_transport_layer()
-        
-        self._main_task = None
-
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
+            except Exception as exc:
+                logger.warning("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
+            finally:
+                self._main_task = None

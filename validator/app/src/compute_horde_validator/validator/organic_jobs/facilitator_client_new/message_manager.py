@@ -1,9 +1,24 @@
 import asyncio
 from collections import deque
 from compute_horde.transport import AbstractTransport
+import pydantic
 from pydantic import BaseModel
 from typing import Deque
-from threading import Event
+import logging
+from compute_horde.fv_protocol.facilitator_requests import (
+    Error,
+    OrganicJobRequest,
+    Response,
+    V0JobCheated,
+    V2JobRequest,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class MessageTypeException(Exception):
+    pass
+
 
 class MessageWrapper(BaseModel):
     """A simple wrapper around a message that allows for retry counting"""
@@ -14,81 +29,147 @@ class MessageWrapper(BaseModel):
 
 class MessageManager:
     """
-    Periodically checks whether any messages are queued and attempts to send
-    these across a transport layer.
+    Handles messaging between the facilitator and the validator components.
 
-    The message manager will only attempt to send messages if the transport
-    layer is connected. It intentionally does not attempt to establish a 
-    connection and relies on other components to ensure connections are active.
+    Performs the following operations:
+    - Manages queued messages to be sent to the facilitator via the transport
+      layer
+    - Listens for messages from the facilitator and pushes them into the 
+      default Django channel layer
+    - Subscribes to messages from the default Django channel layer and pushes
+      them into the message queue to be sent to the facilitator.
     """
-    def __init__(self, transport_layer: AbstractTransport, max_send_retries: int = 3):
+    MAX_MESSAGE_SEND_RETRIES = 3
+
+    def __init__(
+        self,
+        transport_layer: AbstractTransport,
+        local_channels: list[str] | None = None,
+    ):
         """
         Args:
             transport_layer (AbstractTransport): The transport layer to send
                 messages through.
-            max_send_retries (int): The maximum number of times to retry
-                sending a message.
+            local_channels (list[str] | None): The local Django channels to 
+                subscribe to for messages. All messages received from these
+                channels will be added to the message queue to be sent to the
+                facilitator.
         """
+        self._transport_layer = transport_layer
+        self._local_channels = local_channels or []
         self._queue: Deque[MessageWrapper] = deque()
         self._queue_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
-        self._transport_layer = transport_layer
-        self._max_send_retries = max_send_retries
-        self._is_running = False
+        self._stop_event = asyncio.Event()
 
-    async def enqueue_message(self, message: BaseModel) -> None:
-        """
-        Adds message to the end of the queue
+        self._transport_layer_listener_task: asyncio.Task | None = None
+        self._message_sender_task: asyncio.Task | None = None
+        self._local_listeners: list[asyncio.Task] = []
 
-        Args:
-            message (BaseModel): The message to add to the queue.
+    def is_running(self) -> bool:
+        return not self._stop_event.is_set()
+
+    async def start(self):
+        if self.is_running():
+            return
+            
+        self._stop_event.clear()
+
+        self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages)
+        self._message_sender_task = asyncio.create_task(self._send_messages)
+        self._local_listeners = [
+            asyncio.create_task(self._listen_for_local_messages(channel))
+            for channel in self._local_channels
+        ]
+        
+
+    async def _enqueue_message(self, message: BaseModel) -> None:
         """
-        wrapped_msg = MessageWrapper(content=message, max_retries=self._max_send_retries)
+        Adds a message to the end of the queue
+        """
+        wrapped_msg = MessageWrapper(content=message, max_retries=self.MAX_MESSAGE_SEND_RETRIES)
         async with self._queue_lock:
             self._queue.append(wrapped_msg)
 	        
-    async def get_next_message(self) -> MessageWrapper | None:
+    async def _get_next_message(self) -> MessageWrapper | None:
         """
         Gets the oldest message in the queue (FIFO principle)
-        
-        Returns:
-            MessageWrapper | None: The oldest message in the queue or None if
-                the queue is empty.
         """
         with self._queue_lock:
             if not self._queue:
                 return None
             return self._queue.popleft()
         
-    async def retry_message(self, message: MessageWrapper) -> None:
+    async def _retry_message(self, message: MessageWrapper) -> None:
         """
         Inserts message into the front of the queue again to retry sending it.
-        Keeps track of how often a message was retried for logging and
-        optionally emits a SystemEvent (or exception?) if a message cannot be
-        sent
-
-        Args:
-            message (MessageWrapper): The message to reinsert into the front of
-                the queue.
         """
         with self._queue_lock:
             if message.retry_count < message.max_retries:
                 message.retry_count += 1
                 self._queue.appendleft(message)
             else:
-                # TODO: Emit system event, print log message, and/or raise 
-                #   error? Should the type of message impact the behavior?
-                #   E.g. log message for non-critical job update that isn't
-                #   sent but system event/error for jobs that can't be started
-                #   by the miner/executor?
-                raise NotImplementedError()
-    
-    async def start(self):
-        """Sets up the message queue and starts the main loop"""
-        self._is_running = True
-        self._main_task = asyncio.create_task(self._main_loop)
-        
-    async def _main_loop(self):
+                logger.warning("Failed to send message after %s retries: %s", message.max_retries, message.content)
+
+    async def _process_incoming_transport_layer_message(self, message: str) -> None:
+        """
+        Parses an incoming message from the transport layer and takes the 
+        appropriate action.
+        """
+        try:
+            response = Response.model_validate_json(message)
+        except pydantic.ValidationError:
+            pass
+        else:
+            if response.status != "success":
+                logger.error("received error response from facilitator: %r", response)
+            return
+
+        try:
+            job_request = pydantic.TypeAdapter(OrganicJobRequest).validate_json(message)
+        except pydantic.ValidationError:
+            pass
+        else:
+            # TODO
+            # Add job request to Redis channel 'job_requests' --> will be read by the
+            # FacilitatorClient
+            return
+
+        try:
+            return pydantic.TypeAdapter(V0JobCheated).validate_json(message)
+        except pydantic.ValidationError:
+            pass
+        else:
+            # TODO
+            # Add cheated job report to Redis channel 'cheated_job_reports'
+            # --> will be read by the FacilitatorClient
+            return
+
+        logger.error("Unknown message type: %s", message)
+        raise MessageTypeException("Unknown message type: %s", message)
+
+    async def _listen_for_transport_layer_messages(self):
+        """
+        Listens for messages from the transport layer and adds them to the message
+        queue.
+
+        Expects one of the following message types:
+            - Response (sent by the facilitator to acknowledge messages)
+            - OrganicJobRequest
+            - V0JobCheated
+        """
+        try:
+            while self.is_running():
+                message = await self._transport_layer.receive()
+                message = await self._process_incoming_transport_layer_message(message)
+                
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.error("Error listening for transport layer messages: %s: %s", type(exc).__name__, exc)
+            raise
+
+    async def _send_messages(self):
         """
         Main "run forever" loop that attempts to send all queued messages in
         their order. Will retry resending messages if they fail to send and
@@ -113,6 +194,11 @@ class MessageManager:
                 
             await self._try_to_send_next_message()
     
+
+    async def _listen_for_local_messages(self, channel: str):
+        pass
+
+
     async def stop(self):
         """
         Ends message manager. Attempts to send all remaining messages to clear
