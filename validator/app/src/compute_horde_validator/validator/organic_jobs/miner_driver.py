@@ -54,6 +54,7 @@ from compute_horde_validator.validator.receipts.default import receipts
 from compute_horde_validator.validator.routing.default import routing
 from compute_horde_validator.validator.routing.types import JobRoute, MinerIncidentType
 from compute_horde_validator.validator.utils import TRUSTED_MINER_FAKE_KEY
+from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import JOB_STATUS_UPDATE_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -227,8 +228,8 @@ async def execute_organic_job_request(
 
     async def job_status_callback(status_update: JobStatusUpdate):
         await get_channel_layer().send(
-            f"job_status_updates__{status_update.uuid}",
-            {"type": "job_status_update", "payload": status_update.model_dump(mode="json")},
+            JOB_STATUS_UPDATE_CHANNEL,
+            {"payload": status_update.model_dump(mode="json")},
         )
 
     await drive_organic_job(
