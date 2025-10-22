@@ -118,6 +118,7 @@ class SystemEvent(models.Model):
         BLOCK_ALREADY_INSERTED_PROBABLY_BLOCK_CACHE_JITTER_IGNORE_ME_FOR_NOW = (
             "BLOCK_ALREADY_INSERTED_PROBABLY_BLOCK_CACHE_JITTER_IGNORE_ME_FOR_NOW"
         )
+        JOB_STATUS_UPDATE_ERROR = "JOB_STATUS_UPDATE_ERROR"
 
     type = models.CharField(max_length=255, choices=EventType.choices)
     subtype = models.CharField(max_length=255, choices=EventSubType.choices)

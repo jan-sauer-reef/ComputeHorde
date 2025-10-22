@@ -1,4 +1,17 @@
+from django.conf import settings
+from compute_horde_validator.validator.models import SystemEvent
 import asyncio
+import logging
+from pydantic import BaseModel
+from channels.layers import get_channel_layer
+from compute_horde.fv_protocol.validator_requests import (
+    JobStatusUpdate,
+    V0Heartbeat,
+)
+from compute_horde.fv_protocol.facilitator_requests import V0JobCheated
+
+
+default_logger = logging.getLogger(__name__)
 
 
 async def stop_task_gracefully(task: asyncio.Task | None, timeout: float = 5.0) -> None:
@@ -43,3 +56,63 @@ async def interruptable_wait(timeout: float = 1.0, stop_event: asyncio.Event | N
             ],
             return_when=asyncio.FIRST_COMPLETED,
         )
+
+
+async def safe_send_local_message(channel: str, message: BaseModel, timeout: float = 10.0, logger: logging.Logger | None = None) -> None:
+    """
+    Sends a message via the default Django channel layer and includes a timeout
+    to ensure that functions that send messages don't hang indefinitely.
+
+    Any error is logged and then discarded.
+
+    Args:
+        channel (str): The channel over which to send the message.
+        message (BaseModel): The message to send.
+        timeout (float): The timeout in seconds. Defaults to 10.0 seconds.
+        logger (logging.Logger | None): The logger to use. Included to make
+            it easier to trace the source of the error as this is a utility
+            function that may be used by multiple components. If None, a 
+            default logger will be used. Defaults to None.
+    """
+    try:
+        await asyncio.wait_for(
+            get_channel_layer().send(
+                channel,
+                {"payload": message.model_dump(mode="json")},
+            ),
+            timeout=timeout,
+        )
+    except Exception as exc:
+        logger_to_use = logger if logger is not None else default_logger
+        logger_to_use.error(
+            "Error sending message (%s) over channel '%s' | %s: %s",
+            message, channel, type(exc).__name__, exc,
+        )
+
+
+async def save_facilitator_event(message: BaseModel, long_description: str) -> None:
+    """
+    Saves a facilitator client error event. Autoselects the subtype based on the message type.
+
+    Args:
+        message (BaseModel): The message that caused the event.
+        long_description (str): The long description of the event.
+    """
+    if isinstance(message, V0Heartbeat):
+        supertype = SystemEvent.EventType.FACILITATOR_CLIENT_ERROR
+        subtype = SystemEvent.EventSubType.HEARTBEAT_ERROR
+    elif isinstance(message, JobStatusUpdate):
+        supertype = SystemEvent.EventType.FACILITATOR_CLIENT_ERROR
+        subtype = SystemEvent.EventSubType.JOB_STATUS_UPDATE_ERROR
+    elif isinstance(message, V0JobCheated):
+        supertype = SystemEvent.EventType.MINER_ORGANIC_JOB_FAILURE,
+        subtype = SystemEvent.EventSubType.JOB_CHEATED
+    else:
+        supertype = SystemEvent.EventType.FACILITATOR_CLIENT_ERROR
+        subtype = SystemEvent.EventSubType.GENERIC_ERROR
+
+    await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
+        type=supertype,
+        subtype=subtype,
+        long_description=long_description,
+    )

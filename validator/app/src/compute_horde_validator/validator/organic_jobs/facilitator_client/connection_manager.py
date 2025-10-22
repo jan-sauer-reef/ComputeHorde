@@ -73,6 +73,7 @@ class ConnectionManager:
         reraise=True,  # Otherwise we will get a generic RetryError in the trace
     )
     async def _authenticate_connection(self) -> None:
+        """Authenticates the connection with the facilitator."""
         if not self.transport_layer.is_connected():
             raise AuthenticationError(
                 "Transport layer must be connected before authentication is possible", []
@@ -115,18 +116,8 @@ class ConnectionManager:
                 logger.info("when calling connect webhook:", exc_info=True)
 
     async def _connect_transport_layer(self) -> None:
-        try:
-            await self._connect_with_retry()
-        except TransportConnectionError as exc:
-            logger.error("Error connecting to transport layer: %s: %s", type(exc).__name__, exc)
-            raise
-
-        try:
-            await self._authenticate_connection()
-        except AuthenticationError as exc:
-            logger.error("Error authenticating connection: %s: %s", type(exc).__name__, exc)
-            raise
-
+        await self._connect_with_retry()
+        await self._authenticate_connection()
         await self._call_debug_connect_facilitator_webhook()
 
     async def _disconnect_transport_layer(self) -> None:
@@ -149,7 +140,7 @@ class ConnectionManager:
                 # will clean up any remaining resources in the background
                 pass
             except Exception as exc:
-                logger.warning("Error closing HTTP client: %s: %s", type(exc).__name__, exc)
+                logger.error("Error closing HTTP client: %s: %s", type(exc).__name__, exc)
             finally:
                 self._http_client = None
 
@@ -161,7 +152,7 @@ class ConnectionManager:
             # hopefully clean up the connection
             pass
         except Exception as exc:
-            logger.warning("Error disconnecting transport layer: %s: %s", type(exc).__name__, exc)
+            logger.error("Error disconnecting transport layer: %s: %s", type(exc).__name__, exc)
 
     async def _monitor_connection(self) -> None:
         """
@@ -175,9 +166,6 @@ class ConnectionManager:
                 await interruptable_wait(timeout=POLL_INTERVAL, event=self._stop_event)
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            logger.error("Error monitoring connection: %s: %s", type(exc).__name__, exc)
-            raise
         finally:
             await self._cleanup_resources()
 
@@ -208,6 +196,6 @@ class ConnectionManager:
             # any messages and close gracefully
             await stop_task_gracefully(task=self._main_task, timeout=15.0)
         except Exception as exc:
-            logger.warning("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
+            logger.error("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
 
         self._main_task = None

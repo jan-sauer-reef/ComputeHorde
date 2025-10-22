@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from typing import Deque
 import logging
 from compute_horde.fv_protocol.facilitator_requests import (
-    Error,
     OrganicJobRequest,
     Response,
     V0JobCheated,
@@ -17,13 +16,15 @@ from compute_horde.fv_protocol.validator_requests import (
     V0Heartbeat,
 )
 from channels.layers import get_channel_layer
-from .util import stop_task_gracefully, interruptable_wait
+from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, save_facilitator_event
 from .constants import (
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
     HEARTBEAT_CHANNEL,
     CHEATED_JOB_REPORT_CHANNEL,
     POLL_INTERVAL,
+    LOCAL_MESSAGE_SEND_TIMEOUT,
+    TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,6 @@ class MessageManager:
       them into the message queue to be sent to the facilitator.
     """
     MAX_MESSAGE_SEND_RETRIES = 3
-    MESSAGE_SEND_TIMEOUT = 10.0
 
     def __init__(self, transport_layer: AbstractTransport) -> None:
         """
@@ -72,59 +72,6 @@ class MessageManager:
         self._message_sender_task: asyncio.Task | None = None
         self._heartbeat_listener_task: asyncio.Task | None = None
         self._job_status_update_listener_task: asyncio.Task | None = None
-
-    def is_running(self) -> bool:
-        return not self._stop_event.is_set()
-
-    async def start(self) -> None:
-        if self.is_running():
-            return
-            
-        self._stop_event.clear()
-        self._cleanup_event.clear()
-        
-        self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages)
-        self._message_sender_task = asyncio.create_task(self._send_messages)
-        self._heartbeat_listener_task = asyncio.create_task(self._listen_for_local_messages(HEARTBEAT_CHANNEL))
-        self._job_status_update_listener_task = asyncio.create_task(self._listen_for_local_messages(JOB_STATUS_UPDATE_CHANNEL))
-        
-    async def stop(self) -> None:
-        """
-        Ends message manager. Attempts to send all remaining messages to clear
-        the queue
-        """
-        if not self.is_running():
-            return
-        
-        self._stop_event.set()
-
-        # Stop listening for local messages first to prevent messages getting
-        # stuck in the queue after the message sender task has been shut off 
-        # --> messages may now get stuck in the Redis queue
-        try:
-            await stop_task_gracefully(self._job_status_update_listener_task)
-        except Exception as exc:
-            logger.warning("Error stopping job status update listener task: %s: %s", type(exc).__name__, exc)
-
-        try:
-            await stop_task_gracefully(self._heartbeat_listener_task)
-        except Exception as exc:
-            logger.warning("Error stopping heartbeat listener task: %s: %s", type(exc).__name__, exc)
-
-        try:
-            await stop_task_gracefully(self._message_sender_task)
-        except Exception as exc:
-            logger.warning("Error stopping message sender task: %s: %s", type(exc).__name__, exc)
-
-        try:
-            await stop_task_gracefully(self._transport_layer_listener_task)
-        except Exception as exc:
-            logger.warning("Error stopping transport layer listener task: %s: %s", type(exc).__name__, exc)
-
-        self._transport_layer_listener_task = None
-        self._message_sender_task = None
-        self._heartbeat_listener_task = None
-        self._job_status_update_listener_task = None
 
     async def _enqueue_message(self, message: BaseModel) -> None:
         """
@@ -158,7 +105,14 @@ class MessageManager:
                 message.retry_count += 1
                 self._queue.appendleft(message)
             else:
-                logger.warning("Failed to send message after %s retries: %s", message.retry_count, message.content)
+                logger.error(
+                    "Failed to send message (%s) after %s retries",
+                    message.content, message.retry_count
+                )
+                await save_facilitator_event(
+                    message.content,
+                    f"Failed to send message after {message.retry_count} retries",
+                )
 
     async def _process_incoming_transport_layer_message(self, message: str) -> None:
         """
@@ -187,9 +141,11 @@ class MessageManager:
         except pydantic.ValidationError:
             pass
         else:
-            await get_channel_layer().send(
-                JOB_REQUEST_CHANNEL,
-                {"type": "job_request", "payload": job_request.model_dump(mode="json")},
+            await safe_send_local_message(
+                channel=JOB_REQUEST_CHANNEL,
+                message=job_request,
+                timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
+                logger=logger,
             )
             return
 
@@ -198,14 +154,15 @@ class MessageManager:
         except pydantic.ValidationError:
             pass
         else:
-            await get_channel_layer().send(
-                CHEATED_JOB_REPORT_CHANNEL,
-                {"type": "cheated_job_report", "payload": cheated_job_report.model_dump(mode="json")},
+            await safe_send_local_message(
+                channel=CHEATED_JOB_REPORT_CHANNEL,
+                message=cheated_job_report,
+                timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
+                logger=logger,
             )
             return
 
-        logger.error("Unknown message type: %s", message)
-        raise MessageTypeException("Unknown message type: %s", message)
+        logger.error("unsupported or malformed message received from facilitator: %s", message)
 
     async def _listen_for_transport_layer_messages(self) -> None:
         """
@@ -231,9 +188,6 @@ class MessageManager:
                     await self._process_incoming_transport_layer_message(message)
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            logger.error("Error listening for transport layer messages: %s: %s", type(exc).__name__, exc)
-            raise
 
     async def _try_to_send_next_message(self) -> None:
         """Attempt to send the next message in the queue with retries."""
@@ -244,12 +198,16 @@ class MessageManager:
             try:
                 await asyncio.wait_for(
                     self.transport_layer.send(msg.content),
-                    timeout=self.MESSAGE_SEND_TIMEOUT,
+                    timeout=TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT,
                 )
             except Exception as exc:
                 logger.debug(
-                    "Failed to send message (%s) with error %s: %s",
+                    "Failed to send message (%s) with error (%s: %s) and attempting to retry",
                     msg.content, type(exc).__name__, exc
+                )
+                await save_facilitator_event(
+                    msg.content,
+                    f"Failed to send message (retry {msg.retry_count} out of {msg.max_retries}) with error {type(exc).__name__}: {exc}",
                 )
                 await self._retry_message(msg)	  
 
@@ -276,9 +234,6 @@ class MessageManager:
                 await self._try_to_send_next_message()
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            logger.error("Error sending messages through transport layer: %s: %s", type(exc).__name__, exc)
-            raise
 
     async def _process_incoming_local_message(self, msg: dict) -> None:
         """
@@ -291,7 +246,6 @@ class MessageManager:
         try:
             payload = msg["payload"]
         except KeyError:
-            logger.error("Message missing 'payload' field: %s", msg)
             raise MessageTypeException("Message missing 'payload' field: %s", msg)
 
         outgoing = None
@@ -325,7 +279,56 @@ class MessageManager:
                     await self._process_incoming_local_message(msg)
         except asyncio.CancelledError:
             pass
-        except Exception as exc:
-            logger.error("Error listening for local messages: %s: %s", type(exc).__name__, exc)
-            raise
     
+    def is_running(self) -> bool:
+        return not self._stop_event.is_set()
+
+    async def start(self) -> None:
+        if self.is_running():
+            return
+            
+        self._stop_event.clear()
+        self._cleanup_event.clear()
+        
+        self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages)
+        self._message_sender_task = asyncio.create_task(self._send_messages)
+        self._heartbeat_listener_task = asyncio.create_task(self._listen_for_local_messages(HEARTBEAT_CHANNEL))
+        self._job_status_update_listener_task = asyncio.create_task(self._listen_for_local_messages(JOB_STATUS_UPDATE_CHANNEL))
+        
+    async def stop(self) -> None:
+        """
+        Ends message manager. Attempts to send all remaining messages to clear
+        the queue
+        """
+        if not self.is_running():
+            return
+        
+        self._stop_event.set()
+
+        # Stop listening for local messages first to prevent messages getting
+        # stuck in the queue after the message sender task has been shut off 
+        # --> messages may now get stuck in the Redis queue
+        try:
+            await stop_task_gracefully(self._job_status_update_listener_task)
+        except Exception as exc:
+            logger.error("Error stopping job status update listener task: %s: %s", type(exc).__name__, exc)
+
+        try:
+            await stop_task_gracefully(self._heartbeat_listener_task)
+        except Exception as exc:
+            logger.error("Error stopping heartbeat listener task: %s: %s", type(exc).__name__, exc)
+
+        try:
+            await stop_task_gracefully(self._message_sender_task)
+        except Exception as exc:
+            logger.error("Error stopping message sender task: %s: %s", type(exc).__name__, exc)
+
+        try:
+            await stop_task_gracefully(self._transport_layer_listener_task)
+        except Exception as exc:
+            logger.error("Error stopping transport layer listener task: %s: %s", type(exc).__name__, exc)
+
+        self._transport_layer_listener_task = None
+        self._message_sender_task = None
+        self._heartbeat_listener_task = None
+        self._job_status_update_listener_task = None
