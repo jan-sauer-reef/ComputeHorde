@@ -15,7 +15,7 @@ from compute_horde.fv_protocol.validator_requests import (
     JobStatusUpdate,
     V0Heartbeat,
 )
-from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptable_receive_local_message, log_system_error_event
+from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptable_receive_local_message, log_system_error_event, cancel_and_await_task
 from .constants import (
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
@@ -106,8 +106,8 @@ class MessageManager:
             else:
                 await log_system_error_event(
                     message=f"Failed to send message ({message.content}) after {message.retry_count} retries",
-                    type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-                    subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=logger,
                 )
 
@@ -164,8 +164,8 @@ class MessageManager:
 
         await log_system_error_event(
             message=f"unsupported or malformed message received from facilitator: {message}",
-            type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-            subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+            event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+            event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
             logger=logger,
         )
 
@@ -189,17 +189,14 @@ class MessageManager:
                     [receive_task, interrupt_task],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                # Cancel all tasks to prevent task leaks
-                receive_task.cancel()
-                interrupt_task.cancel()
-                try:
-                    await receive_task
-                    await interrupt_task
-                except asyncio.CancelledError:
-                    pass
+                # Cancel potentially unfinished tasks to prevent task leaks
                 if receive_task.done():
+                    await cancel_and_await_task(interrupt_task)
                     message = await receive_task
                     await self._process_incoming_transport_layer_message(message)
+                else:
+                    await cancel_and_await_task(receive_task)
+                    await cancel_and_await_task(interrupt_task)
                 
                 # The transport_layer.receive method is blocking for the 
                 # websockets transport layer but this might not be the case for
@@ -225,12 +222,15 @@ class MessageManager:
                     "Failed to send message (%s) with error (%s: %s) and attempting to retry",
                     msg.content, type(exc).__name__, exc
                 )
-                await self._retry_message(msg)	  
+                await self._retry_message(msg)
+                # Brief wait to allow whatever problem prevented the message to be sent
+                # to (hopefully) be fixed elsewhere
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     async def _send_remaining_messages(self) -> None:
         """Attempt to send all remaining messages in the queue."""
         while True:
-            if self._get_queue_length() == 0:
+            if await self._get_queue_length() == 0:
                 break
             await self._try_to_send_next_message()
 
@@ -241,7 +241,7 @@ class MessageManager:
         """
         try:
             while self.is_running():
-                if self._get_queue_length() == 0:
+                if await self._get_queue_length() == 0:
                     await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
                     continue
 
@@ -266,24 +266,19 @@ class MessageManager:
         message queue.
 
         Args:
-            msg (dict): The message to validate. Expects a "payload" field.
+            msg (dict): The message to validate.
         """
-        try:
-            payload = msg["payload"]
-        except KeyError:
-            raise MessageTypeException(f"Message missing 'payload' field: {msg}")
-
         outgoing = None
         try:
-            outgoing = JobStatusUpdate.model_validate(payload)
+            outgoing = JobStatusUpdate.model_validate(msg)
         except pydantic.ValidationError:
             pass
         try:
-            outgoing = V0Heartbeat.model_validate(payload)
+            outgoing = V0Heartbeat.model_validate(msg)
         except pydantic.ValidationError:
             pass
         if outgoing is None:
-            raise MessageTypeException(f"Unknown message type: {payload}")
+            raise MessageTypeException(f"Unknown message type: {msg}")
         
         await self._enqueue_message(outgoing)
 

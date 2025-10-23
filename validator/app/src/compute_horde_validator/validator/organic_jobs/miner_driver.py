@@ -5,7 +5,6 @@ from functools import partial
 
 import sentry_sdk
 from asgiref.sync import sync_to_async
-from channels.layers import get_channel_layer
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V2JobRequest
 from compute_horde.fv_protocol.validator_requests import (
     HordeFailureDetails,
@@ -55,6 +54,7 @@ from compute_horde_validator.validator.routing.default import routing
 from compute_horde_validator.validator.routing.types import JobRoute, MinerIncidentType
 from compute_horde_validator.validator.utils import TRUSTED_MINER_FAKE_KEY
 from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import JOB_STATUS_UPDATE_CHANNEL
+from compute_horde_validator.validator.organic_jobs.facilitator_client.util import safe_send_local_message
 
 logger = logging.getLogger(__name__)
 
@@ -227,9 +227,10 @@ async def execute_organic_job_request(
     )
 
     async def job_status_callback(status_update: JobStatusUpdate):
-        await get_channel_layer().send(
-            JOB_STATUS_UPDATE_CHANNEL,
-            {"payload": status_update.model_dump(mode="json")},
+        await safe_send_local_message(
+            channel=JOB_STATUS_UPDATE_CHANNEL,
+            message=status_update,
+            logger=logger,
         )
 
     await drive_organic_job(

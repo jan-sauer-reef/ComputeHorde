@@ -10,6 +10,17 @@ from .constants import LOCAL_MESSAGE_SEND_TIMEOUT, GRACEFULLY_STOP_TIMEOUT
 default_logger = logging.getLogger(__name__)
 
 
+async def cancel_and_await_task(task: asyncio.Task) -> None:
+    """
+    A helper function that cancels a task and awaits it.
+    """
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 async def stop_task_gracefully(task: asyncio.Task | None, timeout: float = GRACEFULLY_STOP_TIMEOUT) -> None:
     """
     Waits for a task to end gracefully, cancels it if it doesn't end within
@@ -25,8 +36,7 @@ async def stop_task_gracefully(task: asyncio.Task | None, timeout: float = GRACE
         try:
             await asyncio.wait_for(task, timeout=timeout)
         except asyncio.TimeoutError:
-            task.cancel()
-            await task
+            await cancel_and_await_task(task)
 
 
 async def interruptable_wait(timeout: float = 1.0, stop_event: asyncio.Event | None = None) -> None:
@@ -49,6 +59,9 @@ async def interruptable_wait(timeout: float = 1.0, stop_event: asyncio.Event | N
             [sleep_task, interrupt_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
+        # Cancel the tasks to avoid task leaks
+        await cancel_and_await_task(sleep_task)
+        await cancel_and_await_task(interrupt_task)
 
 
 async def safe_send_local_message(channel: str, message: BaseModel, logger: logging.Logger | None = None) -> None:
@@ -70,7 +83,7 @@ async def safe_send_local_message(channel: str, message: BaseModel, logger: logg
         await asyncio.wait_for(
             get_channel_layer().send(
                 channel,
-                {"payload": message.model_dump(mode="json")},
+                message.model_dump(mode="json"),
             ),
             timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
         )
@@ -84,16 +97,16 @@ async def safe_send_local_message(channel: str, message: BaseModel, logger: logg
 
 async def log_system_error_event(
     message: str,
-    type: SystemEvent.EventType,
-    subtype: SystemEvent.EventSubType,
+    event_type: SystemEvent.EventType,
+    event_subtype: SystemEvent.EventSubType,
     logger: logging.Logger | None = None) -> None:
     """
     Logs a system error event to the default logs and database.
 
     Args:
         message (str): The message to log and save.
-        type (SystemEvent.EventType): The type of the system event.
-        subtype (SystemEvent.EventSubType): The subtype of the system event.
+        event_type (SystemEvent.EventType): The type of the system event.
+        event_subtype (SystemEvent.EventSubType): The subtype of the system event.
         logger (logging.Logger | None): The logger to use. Included to make
             it easier to trace the source of the error as this is a utility
             function that may be used by multiple components. If None, a 
@@ -102,8 +115,8 @@ async def log_system_error_event(
     logger_to_use = logger if logger is not None else default_logger
     logger_to_use.error(message)
     await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
-        type=type,
-        subtype=subtype,
+        type=event_type,
+        subtype=event_subtype,
         long_description=message,
     )
 
@@ -132,19 +145,14 @@ async def interruptable_receive_local_message(channel: str, stop_event: asyncio.
             [receive_task, interrupt_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
-
-        # Cancel all tasks to prevent task leaks
-        receive_task.cancel()
-        interrupt_task.cancel()
-        try:
-            await receive_task
-            await interrupt_task
-        except asyncio.CancelledError:
-            pass
-
+        # Cancel potentially unfinished task to prevent task leaks
         if receive_task.done():
+            await cancel_and_await_task(interrupt_task)
             return await receive_task
-        return None
+        else:
+            await cancel_and_await_task(receive_task)
+            await cancel_and_await_task(interrupt_task)
+            return None
 
 
         

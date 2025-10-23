@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 class JobRequestVerificationFailed(Exception):
     def __init__(self, message: str):
         self.message = message
-        super().__init__(message, JobRejectionReason.INVALID_SIGNATURE)
+        super().__init__(message)
 
 
 class InvalidJobRequestFormat(Exception):
@@ -155,19 +155,23 @@ class JobRequestTask(Task):
     Any task that uses this base class MUST have the job request as the first argument!
     """
     def on_failure(self, exc, task_id, args, kwargs, einfo):
+
+        try:
+            job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(kwargs["job_request"] if kwargs else args[0])
+            job_uuid = job_request.uuid
+        except pydantic.ValidationError:
+            job_uuid = "UNKNOWN"  # uuid can't be parsed if the job request was mangled
+
         if isinstance(exc, InvalidJobRequestFormat):
             message = self._make_job_rejected_message(
-                job_uuid="UNKNOWN",
+                job_uuid=job_uuid,
                 message=exc.message,
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.INVALID_REQUEST_FORMAT,
             )        
-        
-        # If no InvalidJobRequestFormat was raised, then the job request is guaranteed to be an OrganicJobRequest-compliant string
-        job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(kwargs["job_request"] if kwargs else args[0])
-        if isinstance(exc, JobRequestVerificationFailed):
+        elif isinstance(exc, JobRequestVerificationFailed):
             message = self._make_job_rejected_message(
-                job_uuid=job_request.uuid,
+                job_uuid=job_uuid,
                 message=exc.message,
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.INVALID_SIGNATURE,
@@ -175,7 +179,7 @@ class JobRequestTask(Task):
         
         elif isinstance(exc, NotEnoughAllowanceException):
             message = self._make_job_rejected_message(
-                job_uuid=job_request.uuid,
+                job_uuid=job_uuid,
                 message="Job could not be routed to a miner",
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.NO_MINER_FOR_JOB,
@@ -184,7 +188,7 @@ class JobRequestTask(Task):
         else:
             exc = HordeError.wrap_unhandled(exc)
             message = self._make_horde_failed_message(
-                job_uuid=job_request.uuid,
+                job_uuid=job_uuid,
                 reported_by=JobParticipantType.VALIDATOR,
                 message=exc.message,
                 reason=exc.reason,

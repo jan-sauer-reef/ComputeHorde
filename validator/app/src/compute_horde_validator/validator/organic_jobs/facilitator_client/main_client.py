@@ -36,8 +36,8 @@ class FacilitatorClient:
                     except pydantic.ValidationError:
                         await log_system_error_event(
                             message=f"Invalid job request received from facilitator: {msg_or_none}",
-                            type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-                            subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+                            event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                            event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                             logger=logger,
                         )
                         continue
@@ -58,8 +58,8 @@ class FacilitatorClient:
                     except pydantic.ValidationError:
                         await log_system_error_event(
                             message=f"Invalid cheated job report received from facilitator: {msg_or_none}",
-                            type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-                            subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+                            event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                            event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                             logger=logger,
                         )
                         continue
