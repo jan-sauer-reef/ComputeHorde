@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message
-from .constants import HEARTBEAT_CHANNEL, LOCAL_MESSAGE_SEND_TIMEOUT
+from .constants import HEARTBEAT_CHANNEL
 from compute_horde.fv_protocol.validator_requests import V0Heartbeat
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,6 @@ class HeartbeatManager:
                 await safe_send_local_message(
                     channel=HEARTBEAT_CHANNEL,
                     message=V0Heartbeat(),
-                    timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
                     logger=logger,
                 )
                 await interruptable_wait(timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event)

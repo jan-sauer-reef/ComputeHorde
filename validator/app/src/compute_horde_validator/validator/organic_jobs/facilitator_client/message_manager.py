@@ -16,16 +16,16 @@ from compute_horde.fv_protocol.validator_requests import (
     V0Heartbeat,
 )
 from channels.layers import get_channel_layer
-from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, save_facilitator_event
+from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptable_receive_local_message, log_sytem_error_event
 from .constants import (
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
     HEARTBEAT_CHANNEL,
     CHEATED_JOB_REPORT_CHANNEL,
     POLL_INTERVAL,
-    LOCAL_MESSAGE_SEND_TIMEOUT,
     TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT,
 )
+from compute_horde_validator.validator.models import SystemEvent
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +105,11 @@ class MessageManager:
                 message.retry_count += 1
                 self._queue.appendleft(message)
             else:
-                logger.error(
-                    "Failed to send message (%s) after %s retries",
-                    message.content, message.retry_count
-                )
-                await save_facilitator_event(
-                    message.content,
-                    f"Failed to send message after {message.retry_count} retries",
+                await log_sytem_error_event(
+                    message=f"Failed to send message ({message.content}) after {message.retry_count} retries",
+                    type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
+                    logger=logger,
                 )
 
     async def _process_incoming_transport_layer_message(self, message: str) -> None:
@@ -144,7 +142,6 @@ class MessageManager:
             await safe_send_local_message(
                 channel=JOB_REQUEST_CHANNEL,
                 message=job_request,
-                timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
                 logger=logger,
             )
             return
@@ -157,12 +154,12 @@ class MessageManager:
             await safe_send_local_message(
                 channel=CHEATED_JOB_REPORT_CHANNEL,
                 message=cheated_job_report,
-                timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
                 logger=logger,
             )
             return
 
         logger.error("unsupported or malformed message received from facilitator: %s", message)
+        # TODO: Save SystemEvent with subtype unexpected_message
 
     async def _listen_for_transport_layer_messages(self) -> None:
         """
@@ -186,6 +183,12 @@ class MessageManager:
                 if task.done():
                     message = await task
                     await self._process_incoming_transport_layer_message(message)
+                
+                # The transport_layer.receive method is blocking for the 
+                # websockets transport layer but this might not be the case for
+                # other transport layers. To avoid excessive polling of the 
+                # transport layer, an additional cool-down wait is included here.
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
         except asyncio.CancelledError:
             pass
 
@@ -204,10 +207,6 @@ class MessageManager:
                 logger.debug(
                     "Failed to send message (%s) with error (%s: %s) and attempting to retry",
                     msg.content, type(exc).__name__, exc
-                )
-                await save_facilitator_event(
-                    msg.content,
-                    f"Failed to send message (retry {msg.retry_count} out of {msg.max_retries}) with error {type(exc).__name__}: {exc}",
                 )
                 await self._retry_message(msg)	  
 
@@ -268,15 +267,9 @@ class MessageManager:
         """
         try:
             while self.is_running():
-                # Allow the receive to be interrupted in case the channel layer hangs
-                task = asyncio.create_task(get_channel_layer().receive(channel))
-                await asyncio.wait(
-                    (asyncio.create_task(self._stop_event.wait()), task),
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if task.done():
-                    msg = await task
-                    await self._process_incoming_local_message(msg)
+                msg_or_none = await interruptable_receive_local_message(channel, stop_event=self._stop_event)
+                if msg_or_none is not None:
+                    await self._process_incoming_local_message(msg_or_none)
         except asyncio.CancelledError:
             pass
     
