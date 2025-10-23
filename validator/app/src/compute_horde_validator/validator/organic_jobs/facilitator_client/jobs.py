@@ -6,6 +6,7 @@ import os
 from collections import deque
 from typing import Any, Literal
 
+from asgiref.sync import async_to_sync
 import bittensor_wallet
 import httpx
 import pydantic
@@ -72,6 +73,11 @@ class JobRequestVerificationFailed(Exception):
         self.message = message
         super().__init__(message, JobRejectionReason.INVALID_SIGNATURE)
 
+
+class InvalidJobRequestFormat(Exception):
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(message)
 
 async def verify_request_or_fail(job_request: SignedRequest) -> None:
     """
@@ -148,9 +154,17 @@ class JobRequestTask(Task):
 
     Any task that uses this base class MUST have the job request as the first argument!
     """
-    async def on_failure(self, exc, task_id, args, kwargs, einfo):
-        job_request: OrganicJobRequest = kwargs["job_request"] if args else args[0]
-
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
+        if isinstance(exc, InvalidJobRequestFormat):
+            message = self._make_job_rejected_message(
+                job_uuid="UNKNOWN",
+                message=exc.message,
+                rejected_by=JobParticipantType.VALIDATOR,
+                reason=JobRejectionReason.INVALID_REQUEST_FORMAT,
+            )        
+        
+        # If no InvalidJobRequestFormat was raised, then the job request is guaranteed to be an OrganicJobRequest-compliant string
+        job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(kwargs["job_request"] if kwargs else args[0])
         if isinstance(exc, JobRequestVerificationFailed):
             message = self._make_job_rejected_message(
                 job_uuid=job_request.uuid,
@@ -158,7 +172,7 @@ class JobRequestTask(Task):
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.INVALID_SIGNATURE,
             )
-            
+        
         elif isinstance(exc, NotEnoughAllowanceException):
             message = self._make_job_rejected_message(
                 job_uuid=job_request.uuid,
@@ -177,7 +191,7 @@ class JobRequestTask(Task):
                 context=exc.context,
             )
         
-        await safe_send_local_message(
+        async_to_sync(safe_send_local_message)(
             channel=JOB_STATUS_UPDATE_CHANNEL,
             message=message,
             logger=logger,
@@ -204,7 +218,7 @@ class JobRequestTask(Task):
             ),
         )
     
-    async def _make_horde_failed_message(
+    def _make_horde_failed_message(
         self,
         job_uuid: str,
         message: str,
@@ -227,26 +241,34 @@ class JobRequestTask(Task):
 
 
 @app.task(base=JobRequestTask)
-async def job_request_task(job_request: OrganicJobRequest) -> None:
+def job_request_task(job_request: str) -> None:
     """
     Select an appropriate miner for the task and submit the task to it.
+
+    Args:
+        job_request (str): The job request as a JSON string.
     """
-    await verify_request_or_fail(job_request)
+    try:
+        job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(job_request)
+    except pydantic.ValidationError:
+        raise InvalidJobRequestFormat(f"Invalid job request format: {job_request}")
+
+    async_to_sync(verify_request_or_fail)(job_request)
 
     # Notify facilitator that the job request has been received
-    await safe_send_local_message(
+    async_to_sync(safe_send_local_message)(
         channel=JOB_STATUS_UPDATE_CHANNEL,
         message=JobStatusUpdate(uuid=job_request.uuid, status=JobStatus.RECEIVED),
         logger=logger,
     )
 
     # Select an appropriate miner for the task and submit the task to it
-    job_route = await routing().pick_miner_for_job_request(job_request)
+    job_route = async_to_sync(routing)().pick_miner_for_job_request(job_request)
     logger.info(f"Selected miner {job_route.miner.hotkey_ss58} for job {job_request.uuid}")
-    job = await execute_organic_job_request_on_worker(job_request, job_route)
+    job = async_to_sync(execute_organic_job_request_on_worker)(job_request, job_route)
     logger.info(
         f"Job {job_request.uuid} finished with status: {job.status} (comment={job.comment})"
     )
 
     if job.status == OrganicJob.Status.FAILED:
-        await report_miner_failed_job(job)
+        async_to_sync(report_miner_failed_job)(job)

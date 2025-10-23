@@ -15,6 +15,7 @@ class HeartbeatManager:
 
     def __init__(self) -> None:
         self._stop_event = asyncio.Event()
+        self._stop_event.set()  # Start stopped
         self._heartbeat_loop_task: asyncio.Task | None = None
 
     async def _heartbeat_loop(self) -> None:

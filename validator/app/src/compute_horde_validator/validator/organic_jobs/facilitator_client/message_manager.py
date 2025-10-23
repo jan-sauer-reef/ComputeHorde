@@ -15,8 +15,7 @@ from compute_horde.fv_protocol.validator_requests import (
     JobStatusUpdate,
     V0Heartbeat,
 )
-from channels.layers import get_channel_layer
-from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptable_receive_local_message, log_sytem_error_event
+from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptable_receive_local_message, log_system_error_event
 from .constants import (
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
@@ -66,7 +65,7 @@ class MessageManager:
         self._queue_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
-        self._cleanup_event = asyncio.Event()
+        self._stop_event.set()  # Start stopped
 
         self._transport_layer_listener_task: asyncio.Task | None = None
         self._message_sender_task: asyncio.Task | None = None
@@ -100,17 +99,22 @@ class MessageManager:
         """
         Inserts message into the front of the queue again to retry sending it.
         """
-        with self._queue_lock:
+        async with self._queue_lock:
             if message.retry_count < message.max_retries:
                 message.retry_count += 1
                 self._queue.appendleft(message)
             else:
-                await log_sytem_error_event(
+                await log_system_error_event(
                     message=f"Failed to send message ({message.content}) after {message.retry_count} retries",
                     type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=logger,
                 )
+
+    async def _get_queue_length(self) -> int:
+        """Get the length of the queue while avoiding race conditions."""
+        async with self._queue_lock:
+            return len(self._queue)
 
     async def _process_incoming_transport_layer_message(self, message: str) -> None:
         """
@@ -158,8 +162,12 @@ class MessageManager:
             )
             return
 
-        logger.error("unsupported or malformed message received from facilitator: %s", message)
-        # TODO: Save SystemEvent with subtype unexpected_message
+        await log_system_error_event(
+            message=f"unsupported or malformed message received from facilitator: {message}",
+            type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+            subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+            logger=logger,
+        )
 
     async def _listen_for_transport_layer_messages(self) -> None:
         """
@@ -175,13 +183,22 @@ class MessageManager:
                     continue
                     
                 # Allow the receive to be interrupted in case the transport layer hangs
-                task = asyncio.create_task(self.transport_layer.receive())
+                receive_task = asyncio.create_task(self.transport_layer.receive())
+                interrupt_task = asyncio.create_task(self._stop_event.wait())
                 await asyncio.wait(
-                    [asyncio.create_task(self._stop_event.wait()), task],
+                    [receive_task, interrupt_task],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if task.done():
-                    message = await task
+                # Cancel all tasks to prevent task leaks
+                receive_task.cancel()
+                interrupt_task.cancel()
+                try:
+                    await receive_task
+                    await interrupt_task
+                except asyncio.CancelledError:
+                    pass
+                if receive_task.done():
+                    message = await receive_task
                     await self._process_incoming_transport_layer_message(message)
                 
                 # The transport_layer.receive method is blocking for the 
@@ -200,7 +217,7 @@ class MessageManager:
                 return
             try:
                 await asyncio.wait_for(
-                    self.transport_layer.send(msg.content),
+                    self.transport_layer.send(msg.content.model_dump_json()),
                     timeout=TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT,
                 )
             except Exception as exc:
@@ -210,6 +227,13 @@ class MessageManager:
                 )
                 await self._retry_message(msg)	  
 
+    async def _send_remaining_messages(self) -> None:
+        """Attempt to send all remaining messages in the queue."""
+        while True:
+            if self._get_queue_length() == 0:
+                break
+            await self._try_to_send_next_message()
+
     async def _send_messages(self) -> None:
         """
         Goes through message stored in the queue and attempts to send them
@@ -217,7 +241,7 @@ class MessageManager:
         """
         try:
             while self.is_running():
-                if len(self._queue) == 0:
+                if self._get_queue_length() == 0:
                     await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
                     continue
 
@@ -233,6 +257,8 @@ class MessageManager:
                 await self._try_to_send_next_message()
         except asyncio.CancelledError:
             pass
+        finally:
+            await self._send_remaining_messages()
 
     async def _process_incoming_local_message(self, msg: dict) -> None:
         """
@@ -245,19 +271,19 @@ class MessageManager:
         try:
             payload = msg["payload"]
         except KeyError:
-            raise MessageTypeException("Message missing 'payload' field: %s", msg)
+            raise MessageTypeException(f"Message missing 'payload' field: {msg}")
 
         outgoing = None
         try:
-            outgoing = pydantic.TypeAdapter(JobStatusUpdate).validate_json(payload)
+            outgoing = JobStatusUpdate.model_validate(payload)
         except pydantic.ValidationError:
             pass
         try:
-            outgoing = pydantic.TypeAdapter(V0Heartbeat).validate_json(payload)
+            outgoing = V0Heartbeat.model_validate(payload)
         except pydantic.ValidationError:
             pass
         if outgoing is None:
-            raise MessageTypeException("Unknown message type: %s", payload)
+            raise MessageTypeException(f"Unknown message type: {payload}")
         
         await self._enqueue_message(outgoing)
 
@@ -281,12 +307,11 @@ class MessageManager:
             return
             
         self._stop_event.clear()
-        self._cleanup_event.clear()
         
-        self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages)
-        self._message_sender_task = asyncio.create_task(self._send_messages)
+        self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages())
         self._heartbeat_listener_task = asyncio.create_task(self._listen_for_local_messages(HEARTBEAT_CHANNEL))
         self._job_status_update_listener_task = asyncio.create_task(self._listen_for_local_messages(JOB_STATUS_UPDATE_CHANNEL))
+        self._message_sender_task = asyncio.create_task(self._send_messages())
         
     async def stop(self) -> None:
         """
@@ -320,6 +345,11 @@ class MessageManager:
             await stop_task_gracefully(self._transport_layer_listener_task)
         except Exception as exc:
             logger.error("Error stopping transport layer listener task: %s: %s", type(exc).__name__, exc)
+
+        # Attempt to clear the queue one final time. This may have already happened 
+        # in the finally-block of the _send_messages method but if there are too many
+        # messages this may have cancelled too soon.
+        await self._send_remaining_messages()
 
         self._transport_layer_listener_task = None
         self._message_sender_task = None

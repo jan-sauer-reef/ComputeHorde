@@ -1,12 +1,12 @@
 import asyncio
 import pydantic
 import logging
-from compute_horde.fv_protocol.validator_requests import JobStatusUpdate
 from django.conf import settings
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0JobCheated
 from compute_horde_validator.validator.models import SystemEvent
 from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL
-from .util import interruptable_receive_local_message, log_sytem_error_event, stop_task_gracefully
+from .util import interruptable_receive_local_message, log_system_error_event, stop_task_gracefully
+from .jobs import job_request_task, process_miner_cheat_report
 
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ class FacilitatorClient:
 
     def __init__(self) -> None:
         self._stop_event = asyncio.Event()
+        self._stop_event.set()  # Start stopped
         self._job_request_listener_task: asyncio.Task | None = None
         self._cheated_job_report_listener_task: asyncio.Task | None = None
 
@@ -31,16 +32,16 @@ class FacilitatorClient:
                 msg_or_none = await interruptable_receive_local_message(JOB_REQUEST_CHANNEL, stop_event=self._stop_event)
                 if msg_or_none is not None:
                     try:
-                        job_request = pydantic.TypeAdapter(OrganicJobRequest).validate_json(msg_or_none)
+                        job_request: OrganicJobRequest = OrganicJobRequest.model_validate(msg_or_none)
                     except pydantic.ValidationError:
-                        await log_sytem_error_event(
+                        await log_system_error_event(
                             message=f"Invalid job request received from facilitator: {msg_or_none}",
                             type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                             subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                             logger=logger,
                         )
                         continue
-                    # TODO: Send to job dispatcher
+                    job_request_task.delay(job_request.model_dump_json())
         except asyncio.CancelledError:
             pass
 
@@ -53,15 +54,16 @@ class FacilitatorClient:
                 msg_or_none = await interruptable_receive_local_message(CHEATED_JOB_REPORT_CHANNEL, stop_event=self._stop_event)
                 if msg_or_none is not None:
                     try:
-                        cheated_job_report = pydantic.TypeAdapter(V0JobCheated).validate_json(msg_or_none)
+                        cheated_job_report = V0JobCheated.model_validate(msg_or_none)
                     except pydantic.ValidationError:
-                        await log_sytem_error_event(
+                        await log_system_error_event(
                             message=f"Invalid cheated job report received from facilitator: {msg_or_none}",
                             type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                             subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                             logger=logger,
                         )
-                    # TODO: Process cheated job report
+                        continue
+                    await process_miner_cheat_report(cheated_job_report)
         except asyncio.CancelledError:
             pass
 
@@ -73,8 +75,8 @@ class FacilitatorClient:
             return
             
         self._stop_event.clear()
-        self._job_request_listener_task = asyncio.create_task(self._job_request_handler)
-        self._cheated_job_report_listener_task = asyncio.create_task(self._cheated_job_report_handler)
+        self._job_request_listener_task = asyncio.create_task(self._job_request_handler())
+        self._cheated_job_report_listener_task = asyncio.create_task(self._cheated_job_report_handler())
 
     async def stop(self) -> None:
         if not self.is_running():

@@ -27,7 +27,6 @@ class ConnectionManager:
     Periodically checks that the connection across a transport layer is still
     active and reconnects if it isn't.
     """
-    RECONNECT_TIMEOUT = 60
     AUTH_RETRIES = 3
     AUTH_SEND_TIMEOUT = 10.0
     AUTH_RECEIVE_TIMEOUT = 10.0
@@ -52,12 +51,13 @@ class ConnectionManager:
         self.transport_layer = transport_layer
         self.keypair = keypair
         self._stop_event = asyncio.Event()
+        self._stop_event.set()  # Start stopped
         self._cleanup_event = asyncio.Event()
         self._main_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
 
     @tenacity.retry(
-        stop=tenacity.stop_after_delay(RECONNECT_TIMEOUT),
+        stop=tenacity.stop_never,  # Keep attempting to reconnect forever
         wait=tenacity.wait_incrementing(start=2, increment=2, max=10),
         retry=tenacity.retry_if_exception_type(TransportConnectionError),
         reraise=True,  # Otherwise we will get a generic RetryError in the trace
@@ -90,8 +90,8 @@ class ConnectionManager:
             raise AuthenticationError("authentication send timed out", [])
 
         try:
-            raw_msg = asyncio.wait_for(
-                await self.transport_layer.receive(),
+            raw_msg = await asyncio.wait_for(
+                self.transport_layer.receive(),
                 timeout=self.AUTH_RECEIVE_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -163,7 +163,7 @@ class ConnectionManager:
                 if not self.transport_layer.is_connected():
                     await self._connect_transport_layer()
                 # Reduce polling of transport layer
-                await interruptable_wait(timeout=POLL_INTERVAL, event=self._stop_event)
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
         except asyncio.CancelledError:
             pass
         finally:
