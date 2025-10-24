@@ -55,7 +55,7 @@ async def stop_task_gracefully(task: asyncio.Task | None, timeout: float = GRACE
             await cancel_and_await_task(task)
 
 
-async def interruptable_wait(timeout: float = 1.0, stop_event: asyncio.Event | None = None) -> None:
+async def interruptible_wait(timeout: float = 1.0, stop_event: asyncio.Event | None = None) -> None:
     """
     Waits for a given amount of time with the option of interrupting the wait
     by a stop event being set.
@@ -129,7 +129,7 @@ async def log_system_error_event(
     )
 
 
-async def _interruptable_receive_message_helper(awaitable_coroutine: Callable[[], Awaitable[T]], stop_event: asyncio.Event | None = None) -> T | None:
+async def _interruptible_receive_message_helper(awaitable_coroutine: Callable[[], Awaitable[T]], stop_event: asyncio.Event | None = None) -> T | None:
     """
     Helper function that contains common code for interruptible_receive_local_message
     and interruptible_receive_transport_layer_message. Should not be used on its own.
@@ -180,7 +180,7 @@ async def interruptible_receive_local_message(channel: str, stop_event: asyncio.
             was interrupted.
     """
     try:
-        return await _interruptable_receive_message_helper(
+        return await _interruptible_receive_message_helper(
             lambda: get_channel_layer().receive(channel), stop_event
         )
     except _GenericMessageReceiveError as exc:
@@ -205,7 +205,7 @@ async def interruptible_receive_transport_layer_message(transport_layer: Abstrac
             was interrupted.
     """
     try:
-        return await _interruptable_receive_message_helper(
+        return await _interruptible_receive_message_helper(
             transport_layer.receive, stop_event
         )
     except _GenericMessageReceiveError as exc:

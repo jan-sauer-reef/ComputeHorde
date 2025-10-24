@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message
+from .util import stop_task_gracefully, interruptible_wait, safe_send_local_message
 from .constants import HEARTBEAT_CHANNEL, POLL_INTERVAL
 from compute_horde.fv_protocol.validator_requests import V0Heartbeat
 from .exceptions import LocalChannelSendError
@@ -28,7 +28,7 @@ class HeartbeatManager:
         """
         while self.is_running():
             try:
-                await interruptable_wait(timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event)
                 await safe_send_local_message(channel=HEARTBEAT_CHANNEL, message=V0Heartbeat())
             except asyncio.CancelledError:
                 self._stop_event.set()

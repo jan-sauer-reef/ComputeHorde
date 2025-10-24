@@ -13,7 +13,7 @@ from compute_horde.fv_protocol.validator_requests import (
     JobStatusUpdate,
     V0Heartbeat,
 )
-from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptible_receive_local_message, log_system_error_event, interruptible_receive_transport_layer_message, cancel_and_await_task
+from .util import stop_task_gracefully, interruptible_wait, safe_send_local_message, interruptible_receive_local_message, log_system_error_event, interruptible_receive_transport_layer_message, cancel_and_await_task
 from .constants import (
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
@@ -182,7 +182,7 @@ class MessageManager:
                 # This also ensures that the message manager doesn't accidentally 
                 # grab the authentication message
                 if not self.connection_manager.is_connected_and_authenticated():
-                    await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                    await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
                     continue
                     
                 message = await interruptible_receive_transport_layer_message(
@@ -196,7 +196,7 @@ class MessageManager:
                 # websockets transport layer but this might not be the case for
                 # other transport layers. To avoid excessive polling of the 
                 # transport layer, an additional cool-down wait is included here.
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except asyncio.CancelledError:
                 self._stop_event.set()
                 break
@@ -207,7 +207,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except MessageTypeException as exc:
                 await log_system_error_event(
                     message=str(exc),
@@ -215,7 +215,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Error listening to incoming transport layer messages: {type(exc).__name__}: {exc}",
@@ -223,7 +223,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     async def _try_to_send_next_message(self) -> None:
         """
@@ -248,7 +248,7 @@ class MessageManager:
                 await self._retry_message(msg)
                 # Brief wait to allow whatever problem prevented the message to be sent
                 # to (hopefully) be fixed elsewhere
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     async def _send_remaining_messages(self) -> None:
         """Attempt to send all remaining messages in the queue."""
@@ -269,13 +269,13 @@ class MessageManager:
         while self.is_running():
             try:    
                 if await self._get_queue_length() == 0:
-                    await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                    await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
                     continue
 
                 # If transport layer isn't connected, wait (and hope) for
                 # ConnectionManager to re-establish the connection.
                 if not self.connection_manager.is_connected_and_authenticated():
-                    await interruptable_wait(
+                    await interruptible_wait(
                         timeout=POLL_INTERVAL,
                         stop_event=self._stop_event,
                     )
@@ -293,7 +293,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Error sending messages: {type(exc).__name__}: {exc}",
@@ -301,7 +301,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     async def _process_incoming_local_message(self, msg: dict) -> None:
         """
@@ -347,7 +347,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Error listening for local messages: {type(exc).__name__}: {exc}",
@@ -355,7 +355,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
     
     def is_running(self) -> bool:
         return not self._stop_event.is_set()
@@ -395,14 +395,14 @@ class MessageManager:
             logger.error("Error stopping heartbeat listener task: %s: %s", type(exc).__name__, exc)
 
         try:
-            await stop_task_gracefully(self._message_sender_task)
-        except Exception as exc:
-            logger.error("Error stopping message sender task: %s: %s", type(exc).__name__, exc)
-
-        try:
             await stop_task_gracefully(self._transport_layer_listener_task)
         except Exception as exc:
             logger.error("Error stopping transport layer listener task: %s: %s", type(exc).__name__, exc)
+
+        try:
+            await stop_task_gracefully(self._message_sender_task)
+        except Exception as exc:
+            logger.error("Error stopping message sender task: %s: %s", type(exc).__name__, exc)
 
         # Attempt to clear the queue one final time. This may have already happened 
         # in the finally-block of the _send_messages method but if there are too many

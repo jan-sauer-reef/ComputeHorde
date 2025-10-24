@@ -11,7 +11,7 @@ from compute_horde.transport import AbstractTransport, TransportConnectionError
 from compute_horde.fv_protocol.facilitator_requests import Error, Response
 from compute_horde.fv_protocol.validator_requests import V0AuthenticationRequest
 from compute_horde_validator.validator.models import SystemEvent
-from .util import stop_task_gracefully, interruptable_wait, cancel_and_await_task, log_system_error_event
+from .util import stop_task_gracefully, interruptible_wait, cancel_and_await_task, log_system_error_event
 from .constants import POLL_INTERVAL
 
 logger = logging.getLogger(__name__)
@@ -149,7 +149,7 @@ class ConnectionManager:
                 if not self.transport_layer.is_connected():
                     await self._connect_transport_layer()
                 # Reduce polling of transport layer
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except asyncio.CancelledError:
                 self._stop_event.set()
                 await self._cleanup_resources()
@@ -161,7 +161,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.TRANSPORT_CONNECTION_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except AuthenticationError as exc:
                 await log_system_error_event(
                     message=f"Authentication error: {type(exc).__name__}: {exc}",
@@ -169,7 +169,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Unexpected error: {type(exc).__name__}: {exc}",
@@ -177,7 +177,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     def is_running(self) -> bool:
         """Checks if the connection manager is running."""
