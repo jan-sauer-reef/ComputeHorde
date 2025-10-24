@@ -1,14 +1,10 @@
 import asyncio
 import pydantic
 import logging
-from typing import Callable, Awaitable
-from pydantic import BaseModel
-from django.conf import settings
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0JobCheated
 from compute_horde_validator.validator.models import SystemEvent
-from celery import AsyncResult
-from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL
-from .util import interruptible_receive_local_message, log_system_error_event, stop_task_gracefully
+from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL, POLL_INTERVAL
+from .util import interruptible_receive_local_message, log_system_error_event, stop_task_gracefully, interruptable_wait
 from .jobs import job_request_task, process_miner_cheat_report
 from .exceptions import LocalChannelReceiveError
 
@@ -46,6 +42,7 @@ class FacilitatorClient:
                     event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except pydantic.ValidationError:
                 await log_system_error_event(
                     message=f"Invalid job request received from facilitator: {msg_or_none}",
@@ -53,6 +50,7 @@ class FacilitatorClient:
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Error handling job request:: {type(exc).__name__}: {exc}",
@@ -60,6 +58,7 @@ class FacilitatorClient:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     async def _cheated_job_report_handler(self) -> None:
         """
@@ -81,6 +80,7 @@ class FacilitatorClient:
                     event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except pydantic.ValidationError:
                 await log_system_error_event(
                     message=f"Invalid cheated job report received from facilitator: {msg_or_none}",
@@ -88,6 +88,7 @@ class FacilitatorClient:
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Error handling cheated job report:: {type(exc).__name__}: {exc}",
@@ -95,6 +96,7 @@ class FacilitatorClient:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     def is_running(self) -> bool:
         return not self._stop_event.is_set()

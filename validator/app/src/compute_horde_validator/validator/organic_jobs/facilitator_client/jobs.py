@@ -1,49 +1,28 @@
-from celery import Celery, Task
+from celery import Task
 from compute_horde_validator.celery import app
-import asyncio
 import logging
-import os
-from collections import deque
-from typing import Any, Literal
-
 from asgiref.sync import async_to_sync
-import bittensor_wallet
-import httpx
 import pydantic
-import sentry_sdk
-import tenacity
-import websockets
-from channels.layers import get_channel_layer
 from compute_horde.fv_protocol.facilitator_requests import (
-    Error,
     OrganicJobRequest,
-    Response,
     V0JobCheated,
-    V2JobRequest,
 )
 from compute_horde.fv_protocol.validator_requests import (
     HordeFailureDetails,
-    JobFailureDetails,
     JobRejectionDetails,
     JobStatusMetadata,
     JobStatusUpdate,
-    V0AuthenticationRequest,
-    V0Heartbeat,
-    V0MachineSpecsUpdate,
 )
 from compute_horde.job_errors import HordeError
 from compute_horde.protocol_consts import (
     HordeFailureReason,
-    JobFailureReason,
     JobParticipantType,
     JobRejectionReason,
-    JobStage,
     JobStatus,
 )
 from compute_horde.protocol_messages import FailureContext
 from compute_horde_core.signature import SignedRequest, verify_signature
 from django.conf import settings
-from pydantic import BaseModel
 
 from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
 from compute_horde_validator.validator.dynamic_config import aget_config
@@ -56,14 +35,12 @@ from compute_horde_validator.validator.models import (
 from compute_horde_validator.validator.organic_jobs import blacklist
 from compute_horde_validator.validator.organic_jobs.blacklist import report_miner_failed_job
 from compute_horde_validator.validator.routing.default import routing
-from compute_horde_validator.validator.routing.types import JobRoutingException
 from compute_horde_validator.validator.tasks import (
     execute_organic_job_request_on_worker,
     slash_collateral_task,
 )
-from compute_horde_validator.validator.utils import MACHINE_SPEC_CHANNEL
-from .constants import JOB_STATUS_UPDATE_CHANNEL, LOCAL_MESSAGE_SEND_TIMEOUT
-from .util import safe_send_local_message
+from .constants import JOB_STATUS_UPDATE_CHANNEL
+from .util import safe_send_local_message, log_system_error_event
 from .exceptions import LocalChannelSendError
 
 logger = logging.getLogger(__name__)
@@ -170,7 +147,7 @@ class JobRequestTask(Task):
                 message=exc.message,
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.INVALID_REQUEST_FORMAT,
-            )        
+            )
         elif isinstance(exc, JobRequestVerificationFailed):
             message = self._make_job_rejected_message(
                 job_uuid=job_uuid,
@@ -273,7 +250,7 @@ def job_request_task(job_request: str) -> None:
         logger.error(str(exc))
 
     # Select an appropriate miner for the task and submit the task to it
-    job_route = async_to_sync(routing)().pick_miner_for_job_request(job_request)
+    job_route = async_to_sync(routing().pick_miner_for_job_request)(job_request)
     logger.info(f"Selected miner {job_route.miner.hotkey_ss58} for job {job_request.uuid}")
     job = async_to_sync(execute_organic_job_request_on_worker)(job_request, job_route)
     logger.info(

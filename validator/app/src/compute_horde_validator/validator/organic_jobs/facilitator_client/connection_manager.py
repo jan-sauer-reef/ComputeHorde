@@ -4,11 +4,10 @@ import bittensor_wallet
 import pydantic
 import httpx
 import logging
-import tenacity
 
 from django.conf import settings
 
-from compute_horde.transport.base import AbstractTransport, TransportConnectionError
+from compute_horde.transport import AbstractTransport, TransportConnectionError
 from compute_horde.fv_protocol.facilitator_requests import Error, Response
 from compute_horde.fv_protocol.validator_requests import V0AuthenticationRequest
 from compute_horde_validator.validator.models import SystemEvent
@@ -28,9 +27,9 @@ class ConnectionManager:
     Periodically checks that the connection across a transport layer is still
     active and reconnects if it isn't.
     """
-    AUTH_RETRIES = 3
     AUTH_SEND_TIMEOUT = 10.0
     AUTH_RECEIVE_TIMEOUT = 10.0
+    WEBHOOK_TIMEOUT = 10.0
     ADDITIONAL_HTTP_HEADERS = {
         "X-Validator-Runner-Version": os.environ.get("VALIDATOR_RUNNER_VERSION", "unknown"),
         "X-Validator-Version": os.environ.get("VALIDATOR_VERSION", "unknown"),
@@ -53,12 +52,16 @@ class ConnectionManager:
         self.keypair = keypair
         self._stop_event = asyncio.Event()
         self._stop_event.set()  # Start stopped
+        self._authentication_flag = asyncio.Event()
         self._cleanup_event = asyncio.Event()
         self._main_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
     
     async def _authenticate_connection(self) -> None:
         """Authenticates the connection with the facilitator."""
+        # Set to False to ensure authentication doesn't become stale
+        self._authentication_flag.clear()
+
         if not self.transport_layer.is_connected():
             raise AuthenticationError(
                 "Transport layer must be connected before authentication is possible", []
@@ -86,17 +89,19 @@ class ConnectionManager:
             response = Response.model_validate_json(raw_msg)
         except pydantic.ValidationError as exc:
             raise AuthenticationError(
-                "did not receive Response for V0AuthenticationRequest", []
+                f"did not receive Response for V0AuthenticationRequest. Got ({raw_msg}) instead", []
             ) from exc
         if response.status != "success":
             raise AuthenticationError("auth request received failed response", response.errors)
+        
+        self._authentication_flag.set()
 
     async def _call_debug_connect_facilitator_webhook(self) -> None:
         if settings.DEBUG_CONNECT_FACILITATOR_WEBHOOK:
             if self._http_client is None:
                 self._http_client = httpx.AsyncClient()
             try:
-                await self._http_client.get(settings.DEBUG_CONNECT_FACILITATOR_WEBHOOK)
+                await self._http_client.get(settings.DEBUG_CONNECT_FACILITATOR_WEBHOOK, timeout=self.WEBHOOK_TIMEOUT)
             except Exception:
                 logger.info("when calling connect webhook:", exc_info=True)
 
@@ -147,6 +152,7 @@ class ConnectionManager:
                 await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except asyncio.CancelledError:
                 self._stop_event.set()
+                await self._cleanup_resources()
                 break
             except TransportConnectionError as exc:
                 await log_system_error_event(
@@ -155,6 +161,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.TRANSPORT_CONNECTION_ERROR,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except AuthenticationError as exc:
                 await log_system_error_event(
                     message=f"Authentication error: {type(exc).__name__}: {exc}",
@@ -162,6 +169,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
                     logger=logger,
                 )
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
                     message=f"Unexpected error: {type(exc).__name__}: {exc}",
@@ -169,12 +177,23 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
-            finally:
-                await self._cleanup_resources()
+                await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     def is_running(self) -> bool:
         """Checks if the connection manager is running."""
         return not self._stop_event.is_set()
+
+    def is_connected_and_authenticated(self) -> bool:
+        """Checks if the connection is connected and authenticated."""
+        return self.transport_layer.is_connected() and self._authentication_flag.is_set()
+
+    async def receive(self) -> str:
+        """Receives a message from the transport layer."""
+        return await self.transport_layer.receive()
+
+    async def send(self, message: str) -> None:
+        """Sends a message to the transport layer."""
+        await self.transport_layer.send(message)
 
     async def start(self) -> None:
         """Starts the connection manager main loop."""
@@ -201,4 +220,8 @@ class ConnectionManager:
         except Exception as exc:
             logger.error("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
 
+        # Attempt to run cleanup again in case the monitor loop couldn't be stopped gracefully
+        await self._cleanup_resources()
+
+        self._authentication_flag.clear()
         self._main_task = None

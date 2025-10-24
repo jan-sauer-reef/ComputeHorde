@@ -19,7 +19,7 @@ T = TypeVar("T")
 class _GenericMessageReceiveError(Exception):
     """
     Placeholder exception to make it easier to isolate asyncio errors from
-    message receive errors. Should ever be expected anywhere.
+    message receive errors. Should never be expected anywhere.
     """
     def __init__(self, cause: Exception) -> None:
         self.cause = cause
@@ -68,6 +68,7 @@ async def interruptable_wait(timeout: float = 1.0, stop_event: asyncio.Event | N
     """
     if stop_event is None:
         await asyncio.sleep(timeout)
+        return
     if stop_event.is_set():  # Shortcut if the event is already set
         return
     
@@ -95,10 +96,10 @@ async def safe_send_local_message(channel: str, message: BaseModel) -> None:
         LocalChannelSendError: If an error occurs while sending the message.
     """
     try:
-        receive_task = asyncio.create_task(get_channel_layer().send(channel, message.model_dump(mode="json")))
-        await asyncio.wait_for(receive_task, timeout=LOCAL_MESSAGE_SEND_TIMEOUT)
+        send_task = asyncio.create_task(get_channel_layer().send(channel, message.model_dump(mode="json")))
+        await asyncio.wait_for(send_task, timeout=LOCAL_MESSAGE_SEND_TIMEOUT)
     except Exception as exc:
-        await cancel_and_await_task(receive_task)
+        await cancel_and_await_task(send_task)
         raise LocalChannelSendError(cause=exc, channel=channel)
 
 
@@ -128,7 +129,7 @@ async def log_system_error_event(
     )
 
 
-async def _interruptable_receive_message_helper(awaitable_coroutine: Callable[[], Awaitable[T]], stop_event: asyncio.Event | None = None) -> dict | None:
+async def _interruptable_receive_message_helper(awaitable_coroutine: Callable[[], Awaitable[T]], stop_event: asyncio.Event | None = None) -> T | None:
     """
     Helper function that contains common code for interruptible_receive_local_message
     and interruptible_receive_transport_layer_message. Should not be used on its own.
