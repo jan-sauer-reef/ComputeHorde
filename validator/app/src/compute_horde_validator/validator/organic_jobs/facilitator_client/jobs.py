@@ -64,6 +64,7 @@ from compute_horde_validator.validator.tasks import (
 from compute_horde_validator.validator.utils import MACHINE_SPEC_CHANNEL
 from .constants import JOB_STATUS_UPDATE_CHANNEL, LOCAL_MESSAGE_SEND_TIMEOUT
 from .util import safe_send_local_message
+from .exceptions import LocalChannelSendError
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class InvalidJobRequestFormat(Exception):
     def __init__(self, message: str):
         self.message = message
         super().__init__(message)
+
 
 async def verify_request_or_fail(job_request: SignedRequest) -> None:
     """
@@ -176,7 +178,6 @@ class JobRequestTask(Task):
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.INVALID_SIGNATURE,
             )
-        
         elif isinstance(exc, NotEnoughAllowanceException):
             message = self._make_job_rejected_message(
                 job_uuid=job_uuid,
@@ -195,11 +196,13 @@ class JobRequestTask(Task):
                 context=exc.context,
             )
         
-        async_to_sync(safe_send_local_message)(
-            channel=JOB_STATUS_UPDATE_CHANNEL,
-            message=message,
-            logger=logger,
-        )
+        try:
+            async_to_sync(safe_send_local_message)(
+                channel=JOB_STATUS_UPDATE_CHANNEL,
+                message=message,
+            )
+        except LocalChannelSendError as exc:
+            logger.error(str(exc))
 
     def _make_job_rejected_message(
         self,
@@ -260,11 +263,14 @@ def job_request_task(job_request: str) -> None:
     async_to_sync(verify_request_or_fail)(job_request)
 
     # Notify facilitator that the job request has been received
-    async_to_sync(safe_send_local_message)(
-        channel=JOB_STATUS_UPDATE_CHANNEL,
-        message=JobStatusUpdate(uuid=job_request.uuid, status=JobStatus.RECEIVED),
-        logger=logger,
-    )
+    try:
+        async_to_sync(safe_send_local_message)(
+            channel=JOB_STATUS_UPDATE_CHANNEL,
+            message=JobStatusUpdate(uuid=job_request.uuid, status=JobStatus.RECEIVED),
+        )
+    except LocalChannelSendError as exc:
+        # Not sending a job update shouldn't abort the job itself
+        logger.error(str(exc))
 
     # Select an appropriate miner for the task and submit the task to it
     job_route = async_to_sync(routing)().pick_miner_for_job_request(job_request)

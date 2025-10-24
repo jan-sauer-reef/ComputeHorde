@@ -89,6 +89,7 @@ class SystemEvent(models.Model):
         HEARTBEAT_ERROR = "HEARTBEAT_ERROR"
         UNEXPECTED_MESSAGE = "UNEXPECTED_MESSAGE"
         MESSAGE_SEND_ERROR = "MESSAGE_SEND_ERROR"
+        MESSAGE_RECEIVE_ERROR = "MESSAGE_RECEIVE_ERROR"
         UNAUTHORIZED = "UNAUTHORIZED"
         SYNTHETIC_BATCH = "SYNTHETIC_BATCH"
         SYNTHETIC_JOB = "SYNTHETIC_JOB"
@@ -120,6 +121,8 @@ class SystemEvent(models.Model):
             "BLOCK_ALREADY_INSERTED_PROBABLY_BLOCK_CACHE_JITTER_IGNORE_ME_FOR_NOW"
         )
         JOB_STATUS_UPDATE_ERROR = "JOB_STATUS_UPDATE_ERROR"
+        TRANSPORT_CONNECTION_ERROR = "TRANSPORT_CONNECTION_ERROR"
+        AUTHENTICATION_ERROR = "AUTHENTICATION_ERROR"
 
     type = models.CharField(max_length=255, choices=EventType.choices)
     subtype = models.CharField(max_length=255, choices=EventSubType.choices)

@@ -15,7 +15,7 @@ from compute_horde.fv_protocol.validator_requests import (
     JobStatusUpdate,
     V0Heartbeat,
 )
-from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptable_receive_local_message, log_system_error_event, cancel_and_await_task
+from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message, interruptible_receive_local_message, log_system_error_event, interruptible_receive_transport_layer_message, cancel_and_await_task
 from .constants import (
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
@@ -25,12 +25,9 @@ from .constants import (
     TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT,
 )
 from compute_horde_validator.validator.models import SystemEvent
+from .exceptions import LocalChannelSendError
 
 logger = logging.getLogger(__name__)
-
-
-class MessageTypeException(Exception):
-    pass
 
 
 class MessageWrapper(BaseModel):
@@ -38,6 +35,16 @@ class MessageWrapper(BaseModel):
     content: BaseModel
     retry_count: int = 0
     max_retries: int = 3
+
+
+class MessageTypeException(Exception):
+    def __init__(self, message: str) -> None:
+        super().__init__(f"Unknown message type: {message}")
+
+
+class MessageRetryLimitExceeded(Exception):
+    def __init__(self, message: MessageWrapper) -> None:
+        super().__init__(f"Failed to send message ({message.content}) after {message.retry_count} retries")
 
 
 class MessageManager:
@@ -98,18 +105,16 @@ class MessageManager:
     async def _retry_message(self, message: MessageWrapper) -> None:
         """
         Inserts message into the front of the queue again to retry sending it.
+
+        Raises:
+            MessageRetryLimitExceeded: If the message has reached the maximum number of retries.
         """
         async with self._queue_lock:
             if message.retry_count < message.max_retries:
                 message.retry_count += 1
                 self._queue.appendleft(message)
             else:
-                await log_system_error_event(
-                    message=f"Failed to send message ({message.content}) after {message.retry_count} retries",
-                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-                    event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
-                    logger=logger,
-                )
+                raise MessageRetryLimitExceeded(message)
 
     async def _get_queue_length(self) -> int:
         """Get the length of the queue while avoiding race conditions."""
@@ -125,9 +130,13 @@ class MessageManager:
             - Response (sent by the facilitator to acknowledge messages)
             - OrganicJobRequest
             - V0JobCheated
-        
-        Logs an error message and raises a MessageTypeException if the message
-        type is unknown.
+
+        Args:
+            message (str): The message to parse.
+
+        Raises:
+            LocalChannelSendError: If an error occurs while sending the message to the local channel.
+            MessageTypeException: If the message type is unknown.
         """
         try:
             response = Response.model_validate_json(message)
@@ -146,7 +155,6 @@ class MessageManager:
             await safe_send_local_message(
                 channel=JOB_REQUEST_CHANNEL,
                 message=job_request,
-                logger=logger,
             )
             return
 
@@ -158,66 +166,73 @@ class MessageManager:
             await safe_send_local_message(
                 channel=CHEATED_JOB_REPORT_CHANNEL,
                 message=cheated_job_report,
-                logger=logger,
             )
             return
 
-        await log_system_error_event(
-            message=f"unsupported or malformed message received from facilitator: {message}",
-            event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-            event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-            logger=logger,
-        )
+        raise MessageTypeException(message)
 
     async def _listen_for_transport_layer_messages(self) -> None:
         """
         Listens for messages from the transport layer and adds them to the 
         appropriate Django channel.
         """
-        try:
-            while self.is_running():
+        while self.is_running():
+            try:
                 # If transport layer isn't connected, wait (and hope) for
                 # ConnectionManager to re-establish the connection.
                 if not self.transport_layer.is_connected():
                     await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
                     continue
                     
-                # Allow the receive to be interrupted in case the transport layer hangs
-                receive_task = asyncio.create_task(self.transport_layer.receive())
-                interrupt_task = asyncio.create_task(self._stop_event.wait())
-                await asyncio.wait(
-                    [receive_task, interrupt_task],
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                # Cancel potentially unfinished tasks to prevent task leaks
-                if receive_task.done():
-                    await cancel_and_await_task(interrupt_task)
-                    message = await receive_task
+                message = await interruptible_receive_transport_layer_message(self.transport_layer, stop_event=self._stop_event)
+                if message is not None:
                     await self._process_incoming_transport_layer_message(message)
-                else:
-                    await cancel_and_await_task(receive_task)
-                    await cancel_and_await_task(interrupt_task)
                 
                 # The transport_layer.receive method is blocking for the 
                 # websockets transport layer but this might not be the case for
                 # other transport layers. To avoid excessive polling of the 
                 # transport layer, an additional cool-down wait is included here.
                 await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                pass
+            except LocalChannelSendError as exc:
+                await log_system_error_event(
+                    message=str(exc),
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
+                    logger=logger,
+                )
+            except MessageTypeException as exc:
+                await log_system_error_event(
+                    message=str(exc),
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+                    logger=logger,
+                )
+            except Exception as exc:
+                await log_system_error_event(
+                    message=f"Error listening to incoming transport layer messages: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
+                    logger=logger,
+                )
 
     async def _try_to_send_next_message(self) -> None:
-        """Attempt to send the next message in the queue with retries."""
+        """
+        Attempt to send the next message in the queue with retries.
+        
+        Raises:
+            MessageRetryLimitExceeded: If the message has reached the maximum number of retries.
+        """
         async with self._send_lock:
             msg = await self._get_next_message()
             if msg is None:
                 return
             try:
-                await asyncio.wait_for(
-                    self.transport_layer.send(msg.content.model_dump_json()),
-                    timeout=TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT,
-                )
+                send_task = asyncio.create_task(self.transport_layer.send(msg.content.model_dump_json()))
+                await asyncio.wait_for(send_task, timeout=TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT)
             except Exception as exc:
+                await cancel_and_await_task(send_task)
                 logger.debug(
                     "Failed to send message (%s) with error (%s: %s) and attempting to retry",
                     msg.content, type(exc).__name__, exc
@@ -232,15 +247,19 @@ class MessageManager:
         while True:
             if await self._get_queue_length() == 0:
                 break
-            await self._try_to_send_next_message()
+            try:
+                await self._try_to_send_next_message()
+            except MessageRetryLimitExceeded as exc:
+                # This is a cleanup function -> errors can only be logged and accepted at this point
+                logger.error(str(exc))
 
     async def _send_messages(self) -> None:
         """
         Goes through message stored in the queue and attempts to send them
         through the transport layer.
         """
-        try:
-            while self.is_running():
+        while self.is_running():
+            try:    
                 if await self._get_queue_length() == 0:
                     await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
                     continue
@@ -255,10 +274,24 @@ class MessageManager:
                     continue
 
                 await self._try_to_send_next_message()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await self._send_remaining_messages()
+            except asyncio.CancelledError:
+                pass
+            except MessageRetryLimitExceeded as exc:
+                await log_system_error_event(
+                    message=str(exc),
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
+                    logger=logger,
+                )
+            except Exception as exc:
+                await log_system_error_event(
+                    message=f"Error sending messages: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
+                    logger=logger,
+                )
+            finally:
+                await self._send_remaining_messages()
 
     async def _process_incoming_local_message(self, msg: dict) -> None:
         """
@@ -267,6 +300,9 @@ class MessageManager:
 
         Args:
             msg (dict): The message to validate.
+
+        Raises:
+            MessageTypeException: If the message type is unknown.
         """
         outgoing = None
         try:
@@ -278,7 +314,7 @@ class MessageManager:
         except pydantic.ValidationError:
             pass
         if outgoing is None:
-            raise MessageTypeException(f"Unknown message type: {msg}")
+            raise MessageTypeException(msg)
         
         await self._enqueue_message(outgoing)
 
@@ -286,13 +322,27 @@ class MessageManager:
         """
         Listen for messages on the default Django channel and place them into the message queue.
         """
-        try:
-            while self.is_running():
-                msg_or_none = await interruptable_receive_local_message(channel, stop_event=self._stop_event)
+        while self.is_running():
+            try:
+                msg_or_none = await interruptible_receive_local_message(channel, stop_event=self._stop_event)
                 if msg_or_none is not None:
                     await self._process_incoming_local_message(msg_or_none)
-        except asyncio.CancelledError:
-            pass
+            except asyncio.CancelledError:
+                pass
+            except MessageTypeException as exc:
+                await log_system_error_event(
+                    message=str(exc),
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+                    logger=logger,
+                )
+            except Exception as exc:
+                await log_system_error_event(
+                    message=f"Error listening for local messages: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
+                    logger=logger,
+                )
     
     def is_running(self) -> bool:
         return not self._stop_event.is_set()

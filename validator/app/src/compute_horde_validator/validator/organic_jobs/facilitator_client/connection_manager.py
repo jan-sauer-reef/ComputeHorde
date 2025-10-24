@@ -11,7 +11,8 @@ from django.conf import settings
 from compute_horde.transport.base import AbstractTransport, TransportConnectionError
 from compute_horde.fv_protocol.facilitator_requests import Error, Response
 from compute_horde.fv_protocol.validator_requests import V0AuthenticationRequest
-from .util import stop_task_gracefully, interruptable_wait
+from compute_horde_validator.validator.models import SystemEvent
+from .util import stop_task_gracefully, interruptable_wait, cancel_and_await_task, log_system_error_event
 from .constants import POLL_INTERVAL
 
 logger = logging.getLogger(__name__)
@@ -55,23 +56,7 @@ class ConnectionManager:
         self._cleanup_event = asyncio.Event()
         self._main_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
-
-    @tenacity.retry(
-        stop=tenacity.stop_never,  # Keep attempting to reconnect forever
-        wait=tenacity.wait_incrementing(start=2, increment=2, max=10),
-        retry=tenacity.retry_if_exception_type(TransportConnectionError),
-        reraise=True,  # Otherwise we will get a generic RetryError in the trace
-    )
-    async def _connect_with_retry(self) -> None:
-        await self.transport_layer.start(additional_headers=self.ADDITIONAL_HTTP_HEADERS)
     
-    # Authentication could fail if messages are being dropped. A few retries should reduce this possibility
-    @tenacity.retry(
-        stop=tenacity.stop_after_attempt(AUTH_RETRIES),
-        wait=tenacity.wait_incrementing(start=2, increment=2, max=10),
-        retry=tenacity.retry_if_exception_type(AuthenticationError),
-        reraise=True,  # Otherwise we will get a generic RetryError in the trace
-    )
     async def _authenticate_connection(self) -> None:
         """Authenticates the connection with the facilitator."""
         if not self.transport_layer.is_connected():
@@ -116,16 +101,14 @@ class ConnectionManager:
                 logger.info("when calling connect webhook:", exc_info=True)
 
     async def _connect_transport_layer(self) -> None:
-        await self._connect_with_retry()
+        """Connect and authenticate the transport layer and call an optional debug webhook."""
+        await self.transport_layer.start(additional_headers=self.ADDITIONAL_HTTP_HEADERS)
         await self._authenticate_connection()
         await self._call_debug_connect_facilitator_webhook()
 
-    async def _disconnect_transport_layer(self) -> None:
-        await self.transport_layer.stop()
-
     async def _cleanup_resources(self) -> None:
         """
-        Clean up resources. This method is idempotent and can be called multiple times.
+        Clean up resources.
         """
         if self._cleanup_event.is_set():
             return
@@ -134,11 +117,10 @@ class ConnectionManager:
         
         if self._http_client is not None:
             try:
-                await asyncio.wait_for(self._http_client.aclose(), timeout=1.0)
+                close_task = asyncio.create_task(self._http_client.aclose())
+                await asyncio.wait_for(close_task, timeout=1.0)
             except asyncio.TimeoutError:
-                # If the HTTP client can't close then we'll have to hope that Python 
-                # will clean up any remaining resources in the background
-                pass
+                await cancel_and_await_task(close_task)
             except Exception as exc:
                 logger.error("Error closing HTTP client: %s: %s", type(exc).__name__, exc)
             finally:
@@ -146,11 +128,10 @@ class ConnectionManager:
 
         try:
             # Long timeout to allow anything still being transferred to complete
-            await asyncio.wait_for(self._disconnect_transport_layer(), timeout=10.0)
+            stop_task = asyncio.create_task(self.transport_layer.stop())
+            await asyncio.wait_for(stop_task, timeout=10.0)
         except asyncio.TimeoutError:
-            # If the transport layer can't be stopped from this end then the facilitator will 
-            # hopefully clean up the connection
-            pass
+            await cancel_and_await_task(stop_task)
         except Exception as exc:
             logger.error("Error disconnecting transport layer: %s: %s", type(exc).__name__, exc)
 
@@ -158,16 +139,38 @@ class ConnectionManager:
         """
         Check if the transport layer is connected and try to reconnect if it isn't
         """
-        try:
-            while self.is_running():
+        while self.is_running():
+            try:
                 if not self.transport_layer.is_connected():
                     await self._connect_transport_layer()
                 # Reduce polling of transport layer
                 await interruptable_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await self._cleanup_resources()
+            except asyncio.CancelledError:
+                self._stop_event.set()
+                break
+            except TransportConnectionError as exc:
+                await log_system_error_event(
+                    message=f"Transport layer connection error: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.TRANSPORT_CONNECTION_ERROR,
+                    logger=logger,
+                )
+            except AuthenticationError as exc:
+                await log_system_error_event(
+                    message=f"Authentication error: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
+                    logger=logger,
+                )
+            except Exception as exc:
+                await log_system_error_event(
+                    message=f"Unexpected error: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
+                    logger=logger,
+                )
+            finally:
+                await self._cleanup_resources()
 
     def is_running(self) -> bool:
         """Checks if the connection manager is running."""

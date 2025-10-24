@@ -5,9 +5,25 @@ import logging
 from pydantic import BaseModel
 from channels.layers import get_channel_layer
 from .constants import LOCAL_MESSAGE_SEND_TIMEOUT, GRACEFULLY_STOP_TIMEOUT
+from compute_horde.transport import AbstractTransport
+from typing import Callable, Awaitable, TypeVar
+from .exceptions import LocalChannelReceiveError, TransportLayerReceiveError, LocalChannelSendError
 
 
 default_logger = logging.getLogger(__name__)
+
+
+T = TypeVar("T")
+
+
+class _GenericMessageReceiveError(Exception):
+    """
+    Placeholder exception to make it easier to isolate asyncio errors from
+    message receive errors. Should ever be expected anywhere.
+    """
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__(cause)
 
 
 async def cancel_and_await_task(task: asyncio.Task) -> None:
@@ -52,47 +68,38 @@ async def interruptable_wait(timeout: float = 1.0, stop_event: asyncio.Event | N
     """
     if stop_event is None:
         await asyncio.sleep(timeout)
-    else:
-        sleep_task = asyncio.create_task(asyncio.sleep(timeout))
-        interrupt_task = asyncio.create_task(stop_event.wait())
-        await asyncio.wait(
-            [sleep_task, interrupt_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        # Cancel the tasks to avoid task leaks
-        await cancel_and_await_task(sleep_task)
-        await cancel_and_await_task(interrupt_task)
+    if stop_event.is_set():  # Shortcut if the event is already set
+        return
+    
+    sleep_task = asyncio.create_task(asyncio.sleep(timeout))
+    interrupt_task = asyncio.create_task(stop_event.wait())
+    await asyncio.wait(
+        [sleep_task, interrupt_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    # Cancel the tasks to avoid task leaks
+    await cancel_and_await_task(sleep_task)
+    await cancel_and_await_task(interrupt_task)
 
 
-async def safe_send_local_message(channel: str, message: BaseModel, logger: logging.Logger | None = None) -> None:
+async def safe_send_local_message(channel: str, message: BaseModel) -> None:
     """
     Sends a message via the default Django channel layer and includes a timeout
     to ensure that functions that send messages don't hang indefinitely.
 
-    Any error is logged and then discarded.
-
     Args:
         channel (str): The channel over which to send the message.
         message (BaseModel): The message to send.
-        logger (logging.Logger | None): The logger to use. Included to make
-            it easier to trace the source of the error as this is a utility
-            function that may be used by multiple components. If None, a 
-            default logger will be used. Defaults to None.
+
+    Raises:
+        LocalChannelSendError: If an error occurs while sending the message.
     """
     try:
-        await asyncio.wait_for(
-            get_channel_layer().send(
-                channel,
-                message.model_dump(mode="json"),
-            ),
-            timeout=LOCAL_MESSAGE_SEND_TIMEOUT,
-        )
+        receive_task = asyncio.create_task(get_channel_layer().send(channel, message.model_dump(mode="json")))
+        await asyncio.wait_for(receive_task, timeout=LOCAL_MESSAGE_SEND_TIMEOUT)
     except Exception as exc:
-        logger_to_use = logger if logger is not None else default_logger
-        logger_to_use.error(
-            "Error sending message (%s) over channel '%s' | %s: %s",
-            message, channel, type(exc).__name__, exc,
-        )
+        await cancel_and_await_task(receive_task)
+        raise LocalChannelSendError(cause=exc, channel=channel)
 
 
 async def log_system_error_event(
@@ -121,7 +128,39 @@ async def log_system_error_event(
     )
 
 
-async def interruptable_receive_local_message(channel: str, stop_event: asyncio.Event | None = None) -> dict | None:
+async def _interruptable_receive_message_helper(awaitable_coroutine: Callable[[], Awaitable[T]], stop_event: asyncio.Event | None = None) -> dict | None:
+    """
+    Helper function that contains common code for interruptible_receive_local_message
+    and interruptible_receive_transport_layer_message. Should not be used on its own.
+
+    Raises:
+        _GenericMessageReceiveError: If an error occurs while receiving the message.
+    """
+    if stop_event is None:
+        return await awaitable_coroutine()
+    if stop_event.is_set():  # Shortcut if the event is already set
+        return None
+    
+    receive_task = asyncio.create_task(awaitable_coroutine())
+    interrupt_task = asyncio.create_task(stop_event.wait())
+    await asyncio.wait(
+        [receive_task, interrupt_task],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    # Cancel potentially unfinished task to prevent task leaks
+    if receive_task.done():
+        await cancel_and_await_task(interrupt_task)
+        try:
+            return await receive_task
+        except Exception as exc:
+            raise _GenericMessageReceiveError(exc)
+    else:
+        await cancel_and_await_task(receive_task)
+        await cancel_and_await_task(interrupt_task)
+        return None
+
+
+async def interruptible_receive_local_message(channel: str, stop_event: asyncio.Event | None = None) -> dict | None:
     """
     Waits for a message on a specific local Django channel with the option of
     cancelling a blocking receive call by a stop event.
@@ -132,27 +171,41 @@ async def interruptable_receive_local_message(channel: str, stop_event: asyncio.
             None, then the receive will be interrupted when the stop event is set.
             If None, the receive will not be interrupted. Defaults to None.
     
+    Raises:
+        LocalChannelReceiveError: If an error occurs while receiving the message.
+
     Returns:
         dict | None: The message received from the channel or None if the receive
             was interrupted.
     """
-    if stop_event is None:
-        return await get_channel_layer().receive(channel)
-    else:
-        receive_task = asyncio.create_task(get_channel_layer().receive(channel))
-        interrupt_task = asyncio.create_task(stop_event.wait())
-        await asyncio.wait(
-            [receive_task, interrupt_task],
-            return_when=asyncio.FIRST_COMPLETED,
+    try:
+        return await _interruptable_receive_message_helper(
+            lambda: get_channel_layer().receive(channel), stop_event
         )
-        # Cancel potentially unfinished task to prevent task leaks
-        if receive_task.done():
-            await cancel_and_await_task(interrupt_task)
-            return await receive_task
-        else:
-            await cancel_and_await_task(receive_task)
-            await cancel_and_await_task(interrupt_task)
-            return None
+    except _GenericMessageReceiveError as exc:
+        raise LocalChannelReceiveError(cause=exc.cause, channel=channel)
 
 
-        
+async def interruptible_receive_transport_layer_message(transport_layer: AbstractTransport, stop_event: asyncio.Event | None = None) -> str | None:
+    """
+    Waits for a message from the transport layer with the option of cancelling a blocking receive call by a stop event.
+
+    Args:
+        transport_layer (AbstractTransport): The transport layer to receive the message from.
+        stop_event (asyncio.Event | None): The stop event to wait for. If not
+            None, then the receive will be interrupted when the stop event is set.
+            If None, the receive will not be interrupted. Defaults to None.
+
+    Raises:
+        TransportLayerReceiveError: If an error occurs while receiving the message.
+
+    Returns:
+        str | None: The message received from the transport layer or None if the receive
+            was interrupted.
+    """
+    try:
+        return await _interruptable_receive_message_helper(
+            transport_layer.receive, stop_event
+        )
+    except _GenericMessageReceiveError as exc:
+        raise TransportLayerReceiveError(exc.cause)

@@ -55,6 +55,7 @@ from compute_horde_validator.validator.routing.types import JobRoute, MinerIncid
 from compute_horde_validator.validator.utils import TRUSTED_MINER_FAKE_KEY
 from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import JOB_STATUS_UPDATE_CHANNEL
 from compute_horde_validator.validator.organic_jobs.facilitator_client.util import safe_send_local_message
+from compute_horde_validator.validator.organic_jobs.facilitator_client.exceptions import LocalChannelSendError
 
 logger = logging.getLogger(__name__)
 
@@ -227,11 +228,14 @@ async def execute_organic_job_request(
     )
 
     async def job_status_callback(status_update: JobStatusUpdate):
-        await safe_send_local_message(
-            channel=JOB_STATUS_UPDATE_CHANNEL,
-            message=status_update,
-            logger=logger,
-        )
+        try:
+            await safe_send_local_message(
+                channel=JOB_STATUS_UPDATE_CHANNEL,
+                message=status_update,
+            )
+        except LocalChannelSendError as exc:
+            # Not sending job updates shouldn't abort the job but be logged for inspection
+            logger.error(str(exc))
 
     await drive_organic_job(
         miner_client,

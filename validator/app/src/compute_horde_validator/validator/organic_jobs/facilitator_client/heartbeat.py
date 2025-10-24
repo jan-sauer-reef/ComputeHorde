@@ -3,6 +3,9 @@ import logging
 from .util import stop_task_gracefully, interruptable_wait, safe_send_local_message
 from .constants import HEARTBEAT_CHANNEL
 from compute_horde.fv_protocol.validator_requests import V0Heartbeat
+from .exceptions import LocalChannelSendError
+from compute_horde_validator.validator.models import SystemEvent
+from .util import log_system_error_event
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +26,26 @@ class HeartbeatManager:
         Send a heartbeat message to the Django default channel layer in regular
         intervals.
         """
-        try:
-            while self.is_running():
-                await safe_send_local_message(
-                    channel=HEARTBEAT_CHANNEL,
-                    message=V0Heartbeat(),
+        while self.is_running():
+            try:
+                await safe_send_local_message(channel=HEARTBEAT_CHANNEL, message=V0Heartbeat())
+                await interruptable_wait(timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event)
+            except asyncio.CancelledError:
+                pass
+            except LocalChannelSendError as exc:
+                await log_system_error_event(
+                    message=str(exc),
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=logger,
                 )
-                await interruptable_wait(timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event)
-        except asyncio.CancelledError:
-            pass
+            except Exception as exc:
+                await log_system_error_event(
+                    message=f"Error sending heartbeat message: {type(exc).__name__}: {exc}",
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
+                    logger=logger,
+                )
 
     def is_running(self) -> bool:
         return not self._stop_event.is_set()
