@@ -13,6 +13,16 @@ from compute_horde.fv_protocol.validator_requests import V0AuthenticationRequest
 from compute_horde_validator.validator.models import SystemEvent
 from .util import stop_task_gracefully, interruptible_wait, cancel_and_await_task, log_system_error_event
 from .constants import POLL_INTERVAL
+from .base import BaseComponent
+from .metrics import (
+    TRANSPORT_LAYER_EVENTS,
+    VALIDATOR_FC_COMPONENT_STATE,
+    VALIDATOR_FC_TRANSPORT_LAYER_STATE,
+    VALIDATOR_FC_TRANSPORT_LAYER_CONNECTION_DURATION,
+    VALIDATOR_FC_TRANSPORT_LAYER_AUTHENTICATION_DURATION,
+    VALIDATOR_FC_TRANSPORT_LAYER_EVENTS,
+    timing_decorator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,11 +32,12 @@ class AuthenticationError(Exception):
         self.errors = errors
 
 
-class ConnectionManager:
+class ConnectionManager(BaseComponent):
     """
     Periodically checks that the connection across a transport layer is still
     active and reconnects if it isn't.
     """
+    TL_TIMEOUT = 10.0
     AUTH_SEND_TIMEOUT = 10.0
     AUTH_RECEIVE_TIMEOUT = 10.0
     WEBHOOK_TIMEOUT = 10.0
@@ -48,15 +59,26 @@ class ConnectionManager:
                 handles its own reconnection logic as it may be specific to the
                 connection type.
         """
+        super().__init__()
         self.transport_layer = transport_layer
         self.keypair = keypair
-        self._stop_event = asyncio.Event()
-        self._stop_event.set()  # Start stopped
         self._authentication_flag = asyncio.Event()
         self._cleanup_event = asyncio.Event()
         self._main_task: asyncio.Task | None = None
         self._http_client: httpx.AsyncClient | None = None
-    
+
+    @timing_decorator(VALIDATOR_FC_TRANSPORT_LAYER_CONNECTION_DURATION)
+    async def _connect_transport_layer_with_timeout(self) -> None:
+        """Connects to the transport layer with a timeout."""
+        try:
+            await asyncio.wait_for(
+                self.transport_layer.start(additional_headers=self.ADDITIONAL_HTTP_HEADERS),
+                timeout=self.TL_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise TransportConnectionError("transport layer connection timed out")
+
+    @timing_decorator(VALIDATOR_FC_TRANSPORT_LAYER_AUTHENTICATION_DURATION)
     async def _authenticate_connection(self) -> None:
         """Authenticates the connection with the facilitator."""
         # Set to False to ensure authentication doesn't become stale
@@ -105,9 +127,9 @@ class ConnectionManager:
             except Exception:
                 logger.info("when calling connect webhook:", exc_info=True)
 
-    async def _connect_transport_layer(self) -> None:
+    async def _establish_connection(self) -> None:
         """Connect and authenticate the transport layer and call an optional debug webhook."""
-        await self.transport_layer.start(additional_headers=self.ADDITIONAL_HTTP_HEADERS)
+        await self._connect_transport_layer_with_timeout()
         await self._authenticate_connection()
         await self._call_debug_connect_facilitator_webhook()
 
@@ -135,6 +157,7 @@ class ConnectionManager:
             # Long timeout to allow anything still being transferred to complete
             stop_task = asyncio.create_task(self.transport_layer.stop())
             await asyncio.wait_for(stop_task, timeout=10.0)
+            VALIDATOR_FC_TRANSPORT_LAYER_STATE.set(0)
         except asyncio.TimeoutError:
             await cancel_and_await_task(stop_task)
         except Exception as exc:
@@ -147,12 +170,16 @@ class ConnectionManager:
         while self.is_running():
             try:
                 if not self.transport_layer.is_connected():
-                    await self._connect_transport_layer()
+                    VALIDATOR_FC_TRANSPORT_LAYER_STATE.set(0)
+                    await self._establish_connection()
+                    VALIDATOR_FC_TRANSPORT_LAYER_STATE.set(1)
+                    VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="success").inc()
                 # Reduce polling of transport layer
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except asyncio.CancelledError:
                 self._stop_event.set()
                 await self._cleanup_resources()
+                VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except TransportConnectionError as exc:
                 await log_system_error_event(
@@ -161,6 +188,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.TRANSPORT_CONNECTION_ERROR,
                     logger=logger,
                 )
+                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="transport_error").inc()
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except AuthenticationError as exc:
                 await log_system_error_event(
@@ -169,6 +197,7 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
                     logger=logger,
                 )
+                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels("auth_error").inc()
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
@@ -177,11 +206,8 @@ class ConnectionManager:
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
+                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels("unknown_error").inc()
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
-
-    def is_running(self) -> bool:
-        """Checks if the connection manager is running."""
-        return not self._stop_event.is_set()
 
     def is_connected_and_authenticated(self) -> bool:
         """Checks if the connection is connected and authenticated."""
@@ -200,8 +226,10 @@ class ConnectionManager:
         if self.is_running():
             return
 
-        self._stop_event.clear()
+        super().start()
+
         self._cleanup_event.clear()
+        self._authentication_flag.clear()
         self._main_task = asyncio.create_task(self._monitor_connection())
 
     async def stop(self) -> None:
@@ -211,12 +239,13 @@ class ConnectionManager:
         if not self.is_running():
             return
         
-        self._stop_event.set()
+        super().stop()
         
         try:
             # Long timeout to allow the transport layer to finish transmitting
             # any messages and close gracefully
             await stop_task_gracefully(task=self._main_task, timeout=15.0)
+            self._main_task = None
         except Exception as exc:
             logger.error("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
 
@@ -224,4 +253,4 @@ class ConnectionManager:
         await self._cleanup_resources()
 
         self._authentication_flag.clear()
-        self._main_task = None
+        

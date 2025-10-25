@@ -1,27 +1,29 @@
 import asyncio
 import pydantic
 import logging
+import time
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0JobCheated
 from compute_horde_validator.validator.models import SystemEvent
 from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL, POLL_INTERVAL
 from .util import interruptible_receive_local_message, log_system_error_event, stop_task_gracefully, interruptible_wait
 from .jobs import job_request_task, process_miner_cheat_report
 from .exceptions import LocalChannelReceiveError
+from .base import BaseComponent
+from .metrics import VALIDATOR_FC_COMPONENT_STATE
 
 logger = logging.getLogger(__name__)
 
 
-class FacilitatorClient:
+class FacilitatorClient(BaseComponent):
     """
     Handles job requests and cheated job reports sent from the facilitator.
     """
 
     def __init__(self) -> None:
-        self._stop_event = asyncio.Event()
-        self._stop_event.set()  # Start stopped
+        super().__init__()
         self._job_request_listener_task: asyncio.Task | None = None
         self._cheated_job_report_listener_task: asyncio.Task | None = None
-
+        
     async def _job_request_handler(self) -> None:
         """
         Listens for messages on the local job requests channel and forwards these to the job dispatcher.
@@ -34,6 +36,7 @@ class FacilitatorClient:
                     job_request_task.delay(job_request.model_dump_json())
             except asyncio.CancelledError:
                 self._stop_event.set()
+                VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelReceiveError as exc:
                 await log_system_error_event(
@@ -72,6 +75,7 @@ class FacilitatorClient:
                     await process_miner_cheat_report(cheated_job_report)
             except asyncio.CancelledError:
                 self._stop_event.set()
+                VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelReceiveError as exc:
                 await log_system_error_event(
@@ -98,31 +102,31 @@ class FacilitatorClient:
                 )
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
-    def is_running(self) -> bool:
-        return not self._stop_event.is_set()
-
     async def start(self) -> None:
+        """Starts the main client."""
         if self.is_running():
             return
             
-        self._stop_event.clear()
+        super().start()
+
         self._job_request_listener_task = asyncio.create_task(self._job_request_handler())
         self._cheated_job_report_listener_task = asyncio.create_task(self._cheated_job_report_handler())
 
     async def stop(self) -> None:
+        """Stops the main client."""
         if not self.is_running():
             return
-        self._stop_event.set()
+        
+        super().stop()
         
         try:
             await stop_task_gracefully(self._job_request_listener_task)
+            self._job_request_listener_task = None
         except Exception as exc:
             logger.error("Error stopping job request listener task: %s: %s", type(exc).__name__, exc)
 
         try:
             await stop_task_gracefully(self._cheated_job_report_listener_task)
+            self._cheated_job_report_listener_task = None
         except Exception as exc:
             logger.error("Error stopping cheated job report listener task: %s: %s", type(exc).__name__, exc)
-
-        self._job_request_listener_task = None
-        self._cheated_job_report_listener_task = None

@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 import pydantic
+import time
 from pydantic import BaseModel
 from typing import Deque
 import logging
@@ -25,6 +26,17 @@ from .constants import (
 from compute_horde_validator.validator.models import SystemEvent
 from .exceptions import LocalChannelSendError
 from .connection_manager import ConnectionManager
+from .base import BaseComponent
+from .metrics import (
+    MESSAGE_TYPES,
+    VALIDATOR_FC_COMPONENT_STATE,
+    VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
+    VALIDATOR_FC_MESSAGES_SENT,
+    VALIDATOR_FC_MESSAGES_RECEIVED,
+    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
+    VALIDATOR_FC_MESSAGE_SEND_DURATION,
+    timing_decorator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +58,7 @@ class MessageRetryLimitExceeded(Exception):
         super().__init__(f"Failed to send message ({message.content}) after {message.retry_count} retries")
 
 
-class MessageManager:
+class MessageManager(BaseComponent):
     """
     Handles messaging between the facilitator and the validator components.
 
@@ -66,13 +78,12 @@ class MessageManager:
             connection_manager (ConnectionManager): The connection manager to use
                 to interact with the transport layer.
         """
+        super().__init__()
         self.connection_manager = connection_manager
         self._queue: Deque[MessageWrapper] = deque()
         self._queue_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
-        self._stop_event = asyncio.Event()
-        self._stop_event.set()  # Start stopped
-
+        
         self._transport_layer_listener_task: asyncio.Task | None = None
         self._message_sender_task: asyncio.Task | None = None
         self._heartbeat_listener_task: asyncio.Task | None = None
@@ -85,6 +96,7 @@ class MessageManager:
         wrapped_msg = MessageWrapper(content=message, max_retries=self.MAX_MESSAGE_SEND_RETRIES)
         async with self._queue_lock:
             self._queue.append(wrapped_msg)
+            VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(len(self._queue))
 	        
     async def _get_next_message(self) -> MessageWrapper | None:
         """
@@ -97,8 +109,11 @@ class MessageManager:
         """
         async with self._queue_lock:
             try:
-                return self._queue.popleft()
+                msg = self._queue.popleft()
+                VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(len(self._queue))
+                return msg
             except IndexError:  # Empty queue
+                VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(0)
                 return None           
         
     async def _retry_message(self, message: MessageWrapper) -> None:
@@ -112,7 +127,9 @@ class MessageManager:
             if message.retry_count < message.max_retries:
                 message.retry_count += 1
                 self._queue.appendleft(message)
+                VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(len(self._queue))
             else:
+                VALIDATOR_FC_MESSAGE_SEND_FAILURES.labels(message_type=type(message.content).__name__).inc()
                 raise MessageRetryLimitExceeded(message)
 
     async def _get_queue_length(self) -> int:
@@ -192,6 +209,8 @@ class MessageManager:
                 if message is not None:
                     await self._process_incoming_transport_layer_message(message)
                 
+                VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type=type(message).__name__).inc()
+
                 # The transport_layer.receive method is blocking for the 
                 # websockets transport layer but this might not be the case for
                 # other transport layers. To avoid excessive polling of the 
@@ -199,6 +218,7 @@ class MessageManager:
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except asyncio.CancelledError:
                 self._stop_event.set()
+                VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelSendError as exc:
                 await log_system_error_event(
@@ -215,6 +235,7 @@ class MessageManager:
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                     logger=logger,
                 )
+                VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type="unknown").inc()
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
@@ -237,18 +258,28 @@ class MessageManager:
             if msg is None:
                 return
             try:
+                start = time.monotonic()
                 send_task = asyncio.create_task(self.connection_manager.send(msg.content.model_dump_json()))
                 await asyncio.wait_for(send_task, timeout=TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT)
             except Exception as exc:
                 await cancel_and_await_task(send_task)
+
+                await self._retry_message(msg)  # Raises the MessageRetryLimitExceeded exception
+
                 logger.debug(
                     "Failed to send message (%s) with error (%s: %s) and attempting to retry",
                     msg.content, type(exc).__name__, exc
                 )
-                await self._retry_message(msg)
+
                 # Brief wait to allow whatever problem prevented the message to be sent
                 # to (hopefully) be fixed elsewhere
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+            else:
+                VALIDATOR_FC_MESSAGE_SEND_DURATION.labels(message_type=type(msg.content).__name__).observe(time.monotonic() - start)
+                VALIDATOR_FC_MESSAGES_SENT.labels(
+                    message_type=type(msg.content).__name__,
+                    retries=msg.retry_count,
+                ).inc()
 
     async def _send_remaining_messages(self) -> None:
         """Attempt to send all remaining messages in the queue."""
@@ -357,15 +388,13 @@ class MessageManager:
                 )
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
     
-    def is_running(self) -> bool:
-        return not self._stop_event.is_set()
-
     async def start(self) -> None:
+        """Starts the message manager."""
         if self.is_running():
             return
             
-        self._stop_event.clear()
-        
+        super().start()
+
         self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages())
         self._heartbeat_listener_task = asyncio.create_task(self._listen_for_local_messages(HEARTBEAT_CHANNEL))
         self._job_status_update_listener_task = asyncio.create_task(self._listen_for_local_messages(JOB_STATUS_UPDATE_CHANNEL))
@@ -374,12 +403,12 @@ class MessageManager:
     async def stop(self) -> None:
         """
         Ends message manager. Attempts to send all remaining messages to clear
-        the queue
+        the queue.
         """
         if not self.is_running():
             return
         
-        self._stop_event.set()
+        super().stop()
 
         # Stop listening for local messages first to prevent messages getting
         # stuck in the queue after the message sender task has been shut off 
