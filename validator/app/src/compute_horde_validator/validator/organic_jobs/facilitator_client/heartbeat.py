@@ -52,8 +52,8 @@ class HeartbeatManager(BaseComponent):
         if self.is_running():
             return
 
-        super().start()
-        
+        await super().start()
+
         self._heartbeat_loop_task = asyncio.create_task(self._heartbeat_loop())
 
     async def stop(self) -> None:
@@ -61,7 +61,7 @@ class HeartbeatManager(BaseComponent):
         if not self.is_running():
             return
         
-        super().stop()
+        await super().stop()
 
         try:
             await stop_task_gracefully(self._heartbeat_loop_task)

@@ -28,14 +28,12 @@ from .exceptions import LocalChannelSendError
 from .connection_manager import ConnectionManager
 from .base import BaseComponent
 from .metrics import (
-    MESSAGE_TYPES,
     VALIDATOR_FC_COMPONENT_STATE,
     VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
     VALIDATOR_FC_MESSAGES_SENT,
     VALIDATOR_FC_MESSAGES_RECEIVED,
     VALIDATOR_FC_MESSAGE_SEND_FAILURES,
     VALIDATOR_FC_MESSAGE_SEND_DURATION,
-    timing_decorator,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,7 +135,7 @@ class MessageManager(BaseComponent):
         async with self._queue_lock:
             return len(self._queue)
 
-    async def _process_incoming_transport_layer_message(self, message: str) -> None:
+    async def _process_incoming_transport_layer_message(self, message: str) -> BaseModel:
         """
         Parses an incoming message from the transport layer and takes the 
         appropriate action.
@@ -153,6 +151,9 @@ class MessageManager(BaseComponent):
         Raises:
             LocalChannelSendError: If an error occurs while sending the message to the local channel.
             MessageTypeException: If the message type is unknown.
+
+        Returns:
+            BaseModel: The parsed message.
         """
         try:
             response = Response.model_validate_json(message)
@@ -161,7 +162,7 @@ class MessageManager(BaseComponent):
         else:
             if response.status != "success":
                 logger.error("received error response from facilitator: %r", response.model_dump_json())
-            return
+            return response
 
         try:
             job_request = pydantic.TypeAdapter(OrganicJobRequest).validate_json(message)
@@ -172,7 +173,7 @@ class MessageManager(BaseComponent):
                 channel=JOB_REQUEST_CHANNEL,
                 message=job_request,
             )
-            return
+            return job_request
 
         try:
             cheated_job_report = pydantic.TypeAdapter(V0JobCheated).validate_json(message)
@@ -183,7 +184,7 @@ class MessageManager(BaseComponent):
                 channel=CHEATED_JOB_REPORT_CHANNEL,
                 message=cheated_job_report,
             )
-            return
+            return cheated_job_report
 
         raise MessageTypeException(message)
 
@@ -203,11 +204,11 @@ class MessageManager(BaseComponent):
                     continue
                     
                 message = await interruptible_receive_transport_layer_message(
-                    transport_layer=self.connection_manager.transport_layer,
+                    connection_manager=self.connection_manager,
                     stop_event=self._stop_event,
                 )
                 if message is not None:
-                    await self._process_incoming_transport_layer_message(message)
+                    message =await self._process_incoming_transport_layer_message(message)
                 
                 VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type=type(message).__name__).inc()
 
@@ -258,11 +259,17 @@ class MessageManager(BaseComponent):
             if msg is None:
                 return
             try:
+                send_task = None
                 start = time.monotonic()
                 send_task = asyncio.create_task(self.connection_manager.send(msg.content.model_dump_json()))
                 await asyncio.wait_for(send_task, timeout=TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT)
             except Exception as exc:
-                await cancel_and_await_task(send_task)
+                if send_task is None:
+                    # Asyncio could fail in creating the send task itself which would be no fault of the connection itself and shoukdn't count against the message retries
+                    logger.error("Failed to create send task for message (%s) with error (%s: %s) and attempting to retry", msg.content, type(exc).__name__, exc)
+                    msg.retry_count -= 1  # Subtract so that when _retry_message increments, it's net 0
+                else:
+                    await cancel_and_await_task(send_task)
 
                 await self._retry_message(msg)  # Raises the MessageRetryLimitExceeded exception
 
@@ -393,7 +400,7 @@ class MessageManager(BaseComponent):
         if self.is_running():
             return
             
-        super().start()
+        await super().start()
 
         self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages())
         self._heartbeat_listener_task = asyncio.create_task(self._listen_for_local_messages(HEARTBEAT_CHANNEL))
@@ -408,7 +415,7 @@ class MessageManager(BaseComponent):
         if not self.is_running():
             return
         
-        super().stop()
+        await super().stop()
 
         # Stop listening for local messages first to prevent messages getting
         # stuck in the queue after the message sender task has been shut off 

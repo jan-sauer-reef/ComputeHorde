@@ -1,7 +1,6 @@
 import asyncio
 import pydantic
 import logging
-import time
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0JobCheated
 from compute_horde_validator.validator.models import SystemEvent
 from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL, POLL_INTERVAL
@@ -56,7 +55,7 @@ class FacilitatorClient(BaseComponent):
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
-                    message=f"Error handling job request:: {type(exc).__name__}: {exc}",
+                    message=f"Error handling job request: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
@@ -95,7 +94,7 @@ class FacilitatorClient(BaseComponent):
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
-                    message=f"Error handling cheated job report:: {type(exc).__name__}: {exc}",
+                    message=f"Error handling cheated job report: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
@@ -107,7 +106,7 @@ class FacilitatorClient(BaseComponent):
         if self.is_running():
             return
             
-        super().start()
+        await super().start()
 
         self._job_request_listener_task = asyncio.create_task(self._job_request_handler())
         self._cheated_job_report_listener_task = asyncio.create_task(self._cheated_job_report_handler())
@@ -117,7 +116,7 @@ class FacilitatorClient(BaseComponent):
         if not self.is_running():
             return
         
-        super().stop()
+        await super().stop()
         
         try:
             await stop_task_gracefully(self._job_request_listener_task)

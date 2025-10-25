@@ -187,12 +187,13 @@ async def interruptible_receive_local_message(channel: str, stop_event: asyncio.
         raise LocalChannelReceiveError(cause=exc.cause, channel=channel)
 
 
-async def interruptible_receive_transport_layer_message(transport_layer: AbstractTransport, stop_event: asyncio.Event | None = None) -> str | None:
+async def interruptible_receive_transport_layer_message(connection_manager: "ConnectionManager", stop_event: asyncio.Event | None = None) -> str | None:
     """
-    Waits for a message from the transport layer with the option of cancelling a blocking receive call by a stop event.
+    Waits for a message from the transport layer via the connection manager with the option of cancelling a blocking receive call by a stop event.
 
     Args:
-        transport_layer (AbstractTransport): The transport layer to receive the message from.
+        connection_manager (ConnectionManager): The connection manager over which
+            to receive the message.
         stop_event (asyncio.Event | None): The stop event to wait for. If not
             None, then the receive will be interrupted when the stop event is set.
             If None, the receive will not be interrupted. Defaults to None.
@@ -206,7 +207,7 @@ async def interruptible_receive_transport_layer_message(transport_layer: Abstrac
     """
     try:
         return await _interruptible_receive_message_helper(
-            transport_layer.receive, stop_event
+            connection_manager.receive, stop_event
         )
     except _GenericMessageReceiveError as exc:
         raise TransportLayerReceiveError(exc.cause)

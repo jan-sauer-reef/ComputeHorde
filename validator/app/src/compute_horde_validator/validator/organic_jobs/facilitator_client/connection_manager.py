@@ -15,7 +15,6 @@ from .util import stop_task_gracefully, interruptible_wait, cancel_and_await_tas
 from .constants import POLL_INTERVAL
 from .base import BaseComponent
 from .metrics import (
-    TRANSPORT_LAYER_EVENTS,
     VALIDATOR_FC_COMPONENT_STATE,
     VALIDATOR_FC_TRANSPORT_LAYER_STATE,
     VALIDATOR_FC_TRANSPORT_LAYER_CONNECTION_DURATION,
@@ -197,7 +196,7 @@ class ConnectionManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
                     logger=logger,
                 )
-                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels("auth_error").inc()
+                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="auth_error").inc()
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
                 await log_system_error_event(
@@ -206,7 +205,7 @@ class ConnectionManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=logger,
                 )
-                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels("unknown_error").inc()
+                VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="unknown_error").inc()
                 await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
 
     def is_connected_and_authenticated(self) -> bool:
@@ -226,7 +225,7 @@ class ConnectionManager(BaseComponent):
         if self.is_running():
             return
 
-        super().start()
+        await super().start()
 
         self._cleanup_event.clear()
         self._authentication_flag.clear()
@@ -239,7 +238,7 @@ class ConnectionManager(BaseComponent):
         if not self.is_running():
             return
         
-        super().stop()
+        await super().stop()
         
         try:
             # Long timeout to allow the transport layer to finish transmitting
