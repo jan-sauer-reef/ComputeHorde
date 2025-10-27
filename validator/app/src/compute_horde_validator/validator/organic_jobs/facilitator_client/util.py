@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, TypeVar
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from channels.layers import get_channel_layer
 from django.conf import settings
@@ -34,7 +34,7 @@ class _GenericMessageReceiveError(Exception):
         super().__init__(cause)
 
 
-async def cancel_and_await_task(task: asyncio.Task) -> None:
+async def cancel_and_await_task(task: asyncio.Task[Any]) -> None:
     """
     A helper function that cancels a task and awaits it.
     """
@@ -47,7 +47,7 @@ async def cancel_and_await_task(task: asyncio.Task) -> None:
 
 
 async def stop_task_gracefully(
-    task: asyncio.Task | None, timeout: float = GRACEFULLY_STOP_TIMEOUT
+    task: asyncio.Task[Any] | None, timeout: float = GRACEFULLY_STOP_TIMEOUT
 ) -> None:
     """
     Waits for a task to end gracefully, cancels it if it doesn't end within
@@ -145,9 +145,24 @@ async def log_system_error_event(
     )
 
 
+@overload
 async def _interruptible_receive_message_helper(
-    awaitable_coroutine: Callable[[], Awaitable[T]], stop_event: asyncio.Event | None = None
-) -> T | None:
+    awaitable_coroutine: Callable[[], Coroutine[Any, Any, str | bytes]],
+    stop_event: asyncio.Event | None = None,
+) -> str | bytes | None: ...
+
+
+@overload
+async def _interruptible_receive_message_helper(
+    awaitable_coroutine: Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+    stop_event: asyncio.Event | None = None,
+) -> dict[str, Any] | None: ...
+
+
+async def _interruptible_receive_message_helper(
+    awaitable_coroutine: Callable[[], Coroutine[Any, Any, str | bytes | dict[str, Any]]],
+    stop_event: asyncio.Event | None = None,
+) -> str | bytes | dict[str, Any] | None:
     """
     Helper function that contains common code for interruptible_receive_local_message
     and interruptible_receive_transport_layer_message. Should not be used on its own.
@@ -181,7 +196,7 @@ async def _interruptible_receive_message_helper(
 
 async def interruptible_receive_local_message(
     channel: str, stop_event: asyncio.Event | None = None
-) -> dict | None:
+) -> dict[str, Any] | None:
     """
     Waits for a message on a specific local Django channel with the option of
     cancelling a blocking receive call by a stop event.
@@ -200,7 +215,7 @@ async def interruptible_receive_local_message(
             was interrupted.
     """
     try:
-        return await _interruptible_receive_message_helper(
+        return await _interruptible_receive_message_helper(  # type: ignore
             lambda: get_channel_layer().receive(channel), stop_event
         )
     except _GenericMessageReceiveError as exc:
@@ -209,7 +224,7 @@ async def interruptible_receive_local_message(
 
 async def interruptible_receive_transport_layer_message(
     connection_manager: ConnectionManager, stop_event: asyncio.Event | None = None
-) -> str | None:
+) -> str | bytes | None:
     """
     Waits for a message from the transport layer via the connection manager with the option of cancelling a blocking receive call by a stop event.
 
@@ -228,6 +243,8 @@ async def interruptible_receive_transport_layer_message(
             was interrupted.
     """
     try:
-        return await _interruptible_receive_message_helper(connection_manager.receive, stop_event)
+        return await _interruptible_receive_message_helper(
+            awaitable_coroutine=connection_manager.receive, stop_event=stop_event
+        )
     except _GenericMessageReceiveError as exc:
         raise TransportLayerReceiveError(exc.cause)

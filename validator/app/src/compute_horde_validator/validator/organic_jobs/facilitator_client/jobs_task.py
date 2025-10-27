@@ -7,7 +7,6 @@ from celery import Task
 from compute_horde.fv_protocol.facilitator_requests import (
     OrganicJobRequest,
     V0JobCheated,
-    V2JobRequest,
 )
 from compute_horde.fv_protocol.validator_requests import (
     HordeFailureDetails,
@@ -129,7 +128,7 @@ async def process_miner_cheat_report(cheated_job_request: V0JobCheated) -> None:
         slash_collateral_task.delay(str(job.job_uuid))
 
 
-class JobRequestTask(Task):
+class JobRequestTask(Task):  # type: ignore[type-arg]
     """
     A custom task base class that defines a callback in case a task fails.
 
@@ -238,32 +237,31 @@ def job_request_task(job_request: str) -> None:
         job_request (str): The job request as a JSON string.
     """
     try:
-        job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(
-            job_request
-        )
+        organic_job_request: OrganicJobRequest = pydantic.TypeAdapter(
+            OrganicJobRequest
+        ).validate_json(job_request)
     except pydantic.ValidationError:
         raise InvalidJobRequestFormat(f"Invalid job request format: {job_request}")
 
-    if isinstance(job_request, V2JobRequest):
-        logger.debug(f"Received signed job request: {job_request}")
-        async_to_sync(verify_request_or_fail)(job_request)
+    logger.debug(f"Received signed job request: {organic_job_request}")
+    async_to_sync(verify_request_or_fail)(organic_job_request)
 
     # Notify facilitator that the job request has been received
     try:
         async_to_sync(safe_send_local_message)(
             channel=JOB_STATUS_UPDATE_CHANNEL,
-            message=JobStatusUpdate(uuid=job_request.uuid, status=JobStatus.RECEIVED),
+            message=JobStatusUpdate(uuid=organic_job_request.uuid, status=JobStatus.RECEIVED),
         )
     except LocalChannelSendError as exc:
         # Not sending a job update shouldn't abort the job itself
         logger.error(str(exc))
 
     # Select an appropriate miner for the task and submit the task to it
-    job_route = async_to_sync(routing().pick_miner_for_job_request)(job_request)
-    logger.info(f"Selected miner {job_route.miner.hotkey_ss58} for job {job_request.uuid}")
-    job = async_to_sync(execute_organic_job_request_on_worker)(job_request, job_route)
+    job_route = async_to_sync(routing().pick_miner_for_job_request)(organic_job_request)
+    logger.info(f"Selected miner {job_route.miner.hotkey_ss58} for job {organic_job_request.uuid}")
+    job = async_to_sync(execute_organic_job_request_on_worker)(organic_job_request, job_route)
     logger.info(
-        f"Job {job_request.uuid} finished with status: {job.status} (comment={job.comment})"
+        f"Job {organic_job_request.uuid} finished with status: {job.status} (comment={job.comment})"
     )
 
     if job.status == OrganicJob.Status.FAILED:

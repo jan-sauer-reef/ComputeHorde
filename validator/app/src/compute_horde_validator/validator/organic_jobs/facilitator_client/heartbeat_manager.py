@@ -26,7 +26,7 @@ class FacilitatorClientHeartbeatManager(BaseComponent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._heartbeat_loop_task: asyncio.Task | None = None
+        self._heartbeat_loop_task: asyncio.Task[None] | None = None
 
     async def _heartbeat_loop(self) -> None:
         """

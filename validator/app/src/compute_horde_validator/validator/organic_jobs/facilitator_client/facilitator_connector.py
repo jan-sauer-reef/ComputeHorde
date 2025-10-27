@@ -1,41 +1,31 @@
 import asyncio
 import os
 import time
-import bittensor_wallet
 from collections import deque
+from typing import Any
+
+import bittensor_wallet
 import httpx
 import pydantic
-from pydantic import BaseModel
 import sentry_sdk
 from compute_horde.fv_protocol.facilitator_requests import (
     Error,
     OrganicJobRequest,
     Response,
     V0JobCheated,
-    Response,
 )
 from compute_horde.fv_protocol.validator_requests import (
-    V0AuthenticationRequest,
     JobStatusUpdate,
+    V0AuthenticationRequest,
     V0Heartbeat,
 )
 from compute_horde.transport import AbstractTransport, TransportConnectionError
 from django.conf import settings
+from pydantic import BaseModel
+
 from compute_horde_validator.validator.models import SystemEvent
+
 from .base import BaseComponent
-from .metrics import (
-    VALIDATOR_FC_COMPONENT_STATE,
-    VALIDATOR_FC_TRANSPORT_LAYER_AUTHENTICATION_DURATION,
-    VALIDATOR_FC_TRANSPORT_LAYER_CONNECTION_DURATION,
-    VALIDATOR_FC_TRANSPORT_LAYER_EVENTS,
-    VALIDATOR_FC_TRANSPORT_LAYER_STATE,
-    VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
-    VALIDATOR_FC_MESSAGE_SEND_DURATION,
-    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
-    VALIDATOR_FC_MESSAGES_RECEIVED,
-    VALIDATOR_FC_MESSAGES_SENT,
-    timing_decorator,
-)
 from .constants import (
     CHEATED_JOB_REPORT_CHANNEL,
     HEARTBEAT_CHANNEL,
@@ -45,7 +35,19 @@ from .constants import (
     WAIT_ON_ERROR_INTERVAL,
 )
 from .exceptions import LocalChannelSendError
-
+from .metrics import (
+    VALIDATOR_FC_COMPONENT_STATE,
+    VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
+    VALIDATOR_FC_MESSAGE_SEND_DURATION,
+    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
+    VALIDATOR_FC_MESSAGES_RECEIVED,
+    VALIDATOR_FC_MESSAGES_SENT,
+    VALIDATOR_FC_TRANSPORT_LAYER_AUTHENTICATION_DURATION,
+    VALIDATOR_FC_TRANSPORT_LAYER_CONNECTION_DURATION,
+    VALIDATOR_FC_TRANSPORT_LAYER_EVENTS,
+    VALIDATOR_FC_TRANSPORT_LAYER_STATE,
+    timing_decorator,
+)
 from .util import (
     cancel_and_await_task,
     interruptible_receive_local_message,
@@ -55,7 +57,6 @@ from .util import (
     safe_send_local_message,
     stop_task_gracefully,
 )
-
 
 
 class AuthenticationError(Exception):
@@ -97,7 +98,7 @@ class ConnectionManager(BaseComponent):
         self.keypair = keypair
         self._authentication_flag = asyncio.Event()
         self._cleanup_event = asyncio.Event()
-        self._main_task: asyncio.Task | None = None
+        self._main_task: asyncio.Task[None] | None = None
         self._http_client: httpx.AsyncClient | None = None
 
     @timing_decorator(VALIDATOR_FC_TRANSPORT_LAYER_CONNECTION_DURATION)
@@ -144,7 +145,8 @@ class ConnectionManager(BaseComponent):
             response = Response.model_validate_json(raw_msg)
         except pydantic.ValidationError as exc:
             raise AuthenticationError(
-                f"did not receive Response for V0AuthenticationRequest. Got ({raw_msg}) instead", []
+                f"did not receive Response for V0AuthenticationRequest. Got ({raw_msg!r}) instead",
+                [],
             ) from exc
         if response.status != "success":
             raise AuthenticationError("auth request received failed response", response.errors)
@@ -259,7 +261,7 @@ class ConnectionManager(BaseComponent):
         """Checks if the connection is connected and authenticated."""
         return self.transport_layer.is_connected() and self._authentication_flag.is_set()
 
-    async def receive(self) -> str:
+    async def receive(self) -> str | bytes:
         """Receives a message from the transport layer."""
         return await self.transport_layer.receive()
 
@@ -312,8 +314,8 @@ class MessageWrapper(BaseModel):
 
 
 class MessageTypeException(Exception):
-    def __init__(self, message: str) -> None:
-        super().__init__(f"Unknown message type: {message}")
+    def __init__(self, message: str | bytes) -> None:
+        super().__init__(f"Unknown message type: {message!r}")
 
 
 class MessageRetryLimitExceeded(Exception):
@@ -353,10 +355,10 @@ class MessageManager(BaseComponent):
         self._queue_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
 
-        self._transport_layer_listener_task: asyncio.Task | None = None
-        self._message_sender_task: asyncio.Task | None = None
-        self._heartbeat_listener_task: asyncio.Task | None = None
-        self._job_status_update_listener_task: asyncio.Task | None = None
+        self._transport_layer_listener_task: asyncio.Task[None] | None = None
+        self._message_sender_task: asyncio.Task[None] | None = None
+        self._heartbeat_listener_task: asyncio.Task[None] | None = None
+        self._job_status_update_listener_task: asyncio.Task[None] | None = None
 
     async def _enqueue_message(self, message: BaseModel) -> None:
         """
@@ -408,7 +410,7 @@ class MessageManager(BaseComponent):
         async with self._queue_lock:
             return len(self._queue)
 
-    async def _process_incoming_transport_layer_message(self, message: str) -> BaseModel:
+    async def _process_incoming_transport_layer_message(self, message: str | bytes) -> BaseModel:
         """
         Parses an incoming message from the transport layer and takes the
         appropriate action.
@@ -485,9 +487,13 @@ class MessageManager(BaseComponent):
                     stop_event=self._stop_event,
                 )
                 if message is not None:
-                    message = await self._process_incoming_transport_layer_message(message)
+                    validated_message = await self._process_incoming_transport_layer_message(
+                        message
+                    )
 
-                VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type=type(message).__name__).inc()
+                VALIDATOR_FC_MESSAGES_RECEIVED.labels(
+                    message_type=type(validated_message).__name__
+                ).inc()
 
                 # The transport_layer.receive method is blocking for the
                 # websockets transport layer but this might not be the case for
@@ -561,7 +567,7 @@ class MessageManager(BaseComponent):
                         exc,
                     )
                     # Subtract so that when _retry_message increments, it's net 0
-                    msg.retry_count -= 1  
+                    msg.retry_count -= 1
                 else:
                     await cancel_and_await_task(send_task)
 
@@ -645,7 +651,7 @@ class MessageManager(BaseComponent):
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
 
-    async def _process_incoming_local_message(self, msg: dict) -> None:
+    async def _process_incoming_local_message(self, msg: dict[str, Any]) -> BaseModel:
         """
         Validates a message from the default Django channel and adds it to the
         message queue.
@@ -656,19 +662,21 @@ class MessageManager(BaseComponent):
         Raises:
             MessageTypeException: If the message type is unknown.
         """
-        outgoing = None
         try:
-            outgoing = JobStatusUpdate.model_validate(msg)
+            job_status_update: JobStatusUpdate = JobStatusUpdate.model_validate(msg)
         except pydantic.ValidationError:
             pass
-        try:
-            outgoing = V0Heartbeat.model_validate(msg)
-        except pydantic.ValidationError:
-            pass
-        if outgoing is None:
-            raise MessageTypeException(msg)
+        else:
+            return job_status_update
 
-        await self._enqueue_message(outgoing)
+        try:
+            heartbeat: V0Heartbeat = V0Heartbeat.model_validate(msg)
+        except pydantic.ValidationError:
+            pass
+        else:
+            return heartbeat
+
+        raise MessageTypeException(str(msg))
 
     async def _listen_for_local_messages(self, channel: str) -> None:
         """
@@ -680,7 +688,8 @@ class MessageManager(BaseComponent):
                     channel, stop_event=self._stop_event
                 )
                 if msg_or_none is not None:
-                    await self._process_incoming_local_message(msg_or_none)
+                    validated_msg = await self._process_incoming_local_message(msg_or_none)
+                    await self._enqueue_message(validated_msg)
             except asyncio.CancelledError:
                 self._stop_event.set()
                 break
@@ -778,8 +787,10 @@ class MessageManager(BaseComponent):
 
 class FacilitatorClient:
     """A helper class to manage the ConnectionManager and MessageManager in a single class."""
-    
-    def __init__(self, keypair: bittensor_wallet.Keypair, transport_layer: AbstractTransport) -> None:
+
+    def __init__(
+        self, keypair: bittensor_wallet.Keypair, transport_layer: AbstractTransport
+    ) -> None:
         self.connection_manager = ConnectionManager(keypair, transport_layer)
         self.message_manager = MessageManager(self.connection_manager)
 

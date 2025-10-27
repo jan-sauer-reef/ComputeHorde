@@ -17,7 +17,9 @@ from compute_horde_validator.validator.models import (
     MinerManifest,
     SyntheticJobBatch,
 )
-from compute_horde_validator.validator.organic_jobs.facilitator_client.facilitator_connector import FacilitatorClient
+from compute_horde_validator.validator.organic_jobs.facilitator_client.facilitator_connector import (
+    FacilitatorClient,
+)
 from compute_horde_validator.validator.tests.transport import SimulationTransport
 
 
@@ -133,7 +135,7 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
         for future in finish_events:
             if not future.done():
                 future.cancel()
-        
+
         await faci_client.stop()
 
         # This await is crucial as it allows multiple other tasks to get cancelled properly

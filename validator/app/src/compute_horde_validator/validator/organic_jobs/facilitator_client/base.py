@@ -20,7 +20,7 @@ class BaseComponent:
         self._start_time = None
         self._stop_event = asyncio.Event()
         self._stop_event.set()  # Start stopped
-        self._uptime_runner_task: asyncio.Task | None = None
+        self._uptime_runner_task: asyncio.Task[None] | None = None
         self._logger = logging.getLogger(f"{__name__}.{self.name}")
 
     @property
@@ -32,7 +32,7 @@ class BaseComponent:
         Update the uptime of the component in a dedicated thread to keep it
         separate from the functional logic of components.
         """
-        self._start_time = time.monotonic()
+        self._start_time = time.monotonic()  # type: ignore[assignment]
         while self.is_running():
             if self._start_time is not None:
                 uptime = time.monotonic() - self._start_time

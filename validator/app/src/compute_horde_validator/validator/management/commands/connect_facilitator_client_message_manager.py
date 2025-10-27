@@ -37,6 +37,7 @@ class Command(BaseCommand):
         facilitator_client = self.FACILITATOR_CLIENT_CLASS(
             keypair=keypair, transport_layer=transport_layer
         )
+
         async def lifecycle():
             self.STOP_EVENT.clear()
             await facilitator_client.start()

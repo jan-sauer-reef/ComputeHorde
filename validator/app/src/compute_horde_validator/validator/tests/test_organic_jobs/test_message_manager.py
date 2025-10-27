@@ -1,28 +1,29 @@
 import asyncio
+import json
 from typing import Any
 
 import pytest
-import json
-from asgiref.sync import async_to_sync, sync_to_async
 from channels.layers import get_channel_layer
 from compute_horde.fv_protocol.facilitator_requests import Response
 from compute_horde.fv_protocol.validator_requests import JobStatusUpdate, V0Heartbeat
 from compute_horde.transport import StubTransport
-from compute_horde_validator.validator.models import SystemEvent
 
+from compute_horde_validator.validator.models import SystemEvent
 from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import (
     CHEATED_JOB_REPORT_CHANNEL,
     HEARTBEAT_CHANNEL,
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
 )
-from compute_horde_validator.validator.organic_jobs.facilitator_client.facilitator_connector import MessageManager
+from compute_horde_validator.validator.organic_jobs.facilitator_client.facilitator_connector import (
+    MessageManager,
+)
 from compute_horde_validator.validator.organic_jobs.facilitator_client.metrics import (
     VALIDATOR_FC_COMPONENT_STATE,
     VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
+    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
     VALIDATOR_FC_MESSAGES_RECEIVED,
     VALIDATOR_FC_MESSAGES_SENT,
-    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
 )
 
 
@@ -128,9 +129,9 @@ async def test_message_manager_transport_receive_and_forward_local(job_request, 
 @pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
 async def test_message_manager_local_channels_enqueue_and_send():
     stub = StubTransport("stub", messages=[])
-    
+
     message_manager = MessageManager(connection_manager=MockConnectionManager(transport_layer=stub))
-    
+
     sent_before_heartbeat = counter_value(
         VALIDATOR_FC_MESSAGES_SENT, {"message_type": "V0Heartbeat", "retries": "0"}
     )
@@ -146,17 +147,26 @@ async def test_message_manager_local_channels_enqueue_and_send():
     layer = get_channel_layer()
     to_send = [
         (HEARTBEAT_CHANNEL, V0Heartbeat().model_dump(mode="json")),
-        (JOB_STATUS_UPDATE_CHANNEL, JobStatusUpdate(uuid="job-2", status="accepted").model_dump(mode="json")),
-        (JOB_STATUS_UPDATE_CHANNEL, JobStatusUpdate(uuid="job-2", status="executor_ready").model_dump(mode="json")),
+        (
+            JOB_STATUS_UPDATE_CHANNEL,
+            JobStatusUpdate(uuid="job-2", status="accepted").model_dump(mode="json"),
+        ),
+        (
+            JOB_STATUS_UPDATE_CHANNEL,
+            JobStatusUpdate(uuid="job-2", status="executor_ready").model_dump(mode="json"),
+        ),
         (HEARTBEAT_CHANNEL, V0Heartbeat().model_dump(mode="json")),
-        (JOB_STATUS_UPDATE_CHANNEL, JobStatusUpdate(uuid="job-2", status="completed").model_dump(mode="json")),
+        (
+            JOB_STATUS_UPDATE_CHANNEL,
+            JobStatusUpdate(uuid="job-2", status="completed").model_dump(mode="json"),
+        ),
     ]
     for _ch, _msg in to_send:
         await layer.send(_ch, _msg)
         # The waiting is an awkward hack to make sure that the message manager receives messages
         # in this precise order as it reads from both channels simultaneously by design
         await asyncio.sleep(0.1)
-    
+
     await wait_until(lambda: len(stub.sent_messages) >= len(to_send))
 
     assert len(stub.sent_messages) == len(to_send)
@@ -203,7 +213,9 @@ class FlakySendStubTransport(StubTransport):
 @pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
 async def test_message_manager_retries_on_send_failure():
     flaky = FlakySendStubTransport("flaky", messages=[], fail_times=1)
-    message_manager = MessageManager(connection_manager=MockConnectionManager(transport_layer=flaky))
+    message_manager = MessageManager(
+        connection_manager=MockConnectionManager(transport_layer=flaky)
+    )
     message_manager.MSG_RETRY_DELAY = 0.01
 
     sent_before_retry = counter_value(
@@ -219,9 +231,7 @@ async def test_message_manager_retries_on_send_failure():
 
     # Metrics reflect one retry
     assert (
-        counter_value(
-            VALIDATOR_FC_MESSAGES_SENT, {"message_type": "V0Heartbeat", "retries": "1"}
-        )
+        counter_value(VALIDATOR_FC_MESSAGES_SENT, {"message_type": "V0Heartbeat", "retries": "1"})
         == sent_before_retry + 1
     )
 
@@ -231,12 +241,13 @@ async def test_message_manager_retries_on_send_failure():
     await message_manager.stop()
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.django_db(databases=["default", "default_alias"])
 async def test_message_manager_too_many_retries_on_send_failure(settings):
     flaky = FlakySendStubTransport("flaky", messages=[], fail_times=3)
-    message_manager = MessageManager(connection_manager=MockConnectionManager(transport_layer=flaky))
+    message_manager = MessageManager(
+        connection_manager=MockConnectionManager(transport_layer=flaky)
+    )
     message_manager.MSG_RETRY_DELAY = 0.01
     message_manager.MAX_MESSAGE_SEND_RETRIES = 2
 
@@ -248,14 +259,21 @@ async def test_message_manager_too_many_retries_on_send_failure(settings):
     await message_manager.start()
 
     async def _acount() -> int:
-        return (await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).filter(
-            type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-            subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
-        ).acount()) >= 1
+        return (
+            await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS)
+            .filter(
+                type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
+            )
+            .acount()
+        ) >= 1
 
     await wait_until_async(_acount)
 
-    assert counter_value(VALIDATOR_FC_MESSAGE_SEND_FAILURES, {"message_type": "V0Heartbeat"}) == failed_before + 1
+    assert (
+        counter_value(VALIDATOR_FC_MESSAGE_SEND_FAILURES, {"message_type": "V0Heartbeat"})
+        == failed_before + 1
+    )
     assert await _acount()
 
     await message_manager.stop()

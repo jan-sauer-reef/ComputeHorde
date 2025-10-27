@@ -26,8 +26,8 @@ class FacilitatorClientJobRequestManager(BaseComponent):
 
     def __init__(self) -> None:
         super().__init__()
-        self._job_request_listener_task: asyncio.Task | None = None
-        self._cheated_job_report_listener_task: asyncio.Task | None = None
+        self._job_request_listener_task: asyncio.Task[None] | None = None
+        self._cheated_job_report_listener_task: asyncio.Task[None] | None = None
 
     async def _job_request_handler(self) -> None:
         """
