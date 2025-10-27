@@ -5,15 +5,15 @@ import signal
 from asgiref.sync import async_to_sync
 from django.core.management.base import BaseCommand
 
-from compute_horde_validator.validator.organic_jobs.facilitator_client.main_client import (
-    FacilitatorClient,
+from compute_horde_validator.validator.organic_jobs.facilitator_client.job_request_manager import (
+    FacilitatorClientJobRequestManager,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    FACILITATOR_CLIENT_CLASS = FacilitatorClient
+    JOB_HANDLER_CLASS = FacilitatorClientJobRequestManager
     STOP_EVENT = asyncio.Event()
 
     def __init__(self):
@@ -24,13 +24,13 @@ class Command(BaseCommand):
     async def handle(self, *args, **options):
         logger.info("Starting facilitator client job handler")
 
-        facilitator_client = self.FACILITATOR_CLIENT_CLASS()
+        job_handler = self.JOB_HANDLER_CLASS()
 
         async def lifecycle():
             self.STOP_EVENT.clear()
-            await facilitator_client.start()
+            await job_handler.start()
             await self.STOP_EVENT.wait()
-            await facilitator_client.stop()
+            await job_handler.stop()
 
         task = asyncio.create_task(lifecycle())
         await task

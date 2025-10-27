@@ -10,7 +10,7 @@ VALIDATOR_FC_COMPONENT_STATE = prometheus_client.Gauge(
     "Current state of facilitator client components (1=running, 0=stopped)",
     labelnames=[
         "component"
-    ],  # One of FacilitatorClient, ConnectionManager, MessageManager, HeartbeatManager
+    ],  # One of ConnectionManager, MessageManager, HeartbeatManager, JobRequestManager
     namespace="validator",
 )
 
@@ -19,7 +19,7 @@ VALIDATOR_FC_COMPONENT_UPTIME = prometheus_client.Gauge(
     "Time in seconds since the component's run-forever loop was started",
     labelnames=[
         "component"
-    ],  # One of FacilitatorClient, ConnectionManager, MessageManager, HeartbeatManager
+    ],  # One of ConnectionManager, MessageManager, HeartbeatManager, JobRequestManager
     namespace="validator",
     unit="seconds",
 )

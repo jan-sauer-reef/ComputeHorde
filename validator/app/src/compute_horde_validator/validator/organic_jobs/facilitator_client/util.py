@@ -15,7 +15,7 @@ from .constants import GRACEFULLY_STOP_TIMEOUT
 from .exceptions import LocalChannelReceiveError, LocalChannelSendError, TransportLayerReceiveError
 
 if TYPE_CHECKING:
-    from .connection_manager import ConnectionManager
+    from .facilitator_connector import ConnectionManager
 
 default_logger = logging.getLogger(__name__)
 
@@ -38,11 +38,12 @@ async def cancel_and_await_task(task: asyncio.Task) -> None:
     """
     A helper function that cancels a task and awaits it.
     """
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 async def stop_task_gracefully(
@@ -140,6 +141,7 @@ async def log_system_error_event(
         type=event_type,
         subtype=event_subtype,
         long_description=message,
+        data={},
     )
 
 

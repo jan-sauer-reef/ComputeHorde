@@ -9,7 +9,7 @@ from compute_horde_validator.validator.models import SystemEvent
 from .base import BaseComponent
 from .constants import CHEATED_JOB_REPORT_CHANNEL, JOB_REQUEST_CHANNEL, WAIT_ON_ERROR_INTERVAL
 from .exceptions import LocalChannelReceiveError
-from .jobs import job_request_task, process_miner_cheat_report
+from .jobs_task import job_request_task, process_miner_cheat_report
 from .metrics import VALIDATOR_FC_COMPONENT_STATE
 from .util import (
     interruptible_receive_local_message,
@@ -19,7 +19,7 @@ from .util import (
 )
 
 
-class FacilitatorClient(BaseComponent):
+class FacilitatorClientJobRequestManager(BaseComponent):
     """
     Handles job requests and cheated job reports sent from the facilitator.
     """
