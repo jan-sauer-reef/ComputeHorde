@@ -1,6 +1,7 @@
 import asyncio
 import json
 from typing import Any
+from pydantic import BaseModel
 
 import pytest
 from channels.layers import get_channel_layer
@@ -97,6 +98,9 @@ async def test_message_manager_transport_receive_and_forward_local(job_request, 
     }
 
     await message_manager.start()
+    await asyncio.sleep(0.1)
+
+    assert gauge_value(VALIDATOR_FC_COMPONENT_STATE, {"component": "MessageManager"}) == 1
 
     # Verify messages from transport are forwarded to local channels
     layer = get_channel_layer()
@@ -242,7 +246,7 @@ async def test_message_manager_retries_on_send_failure():
 
 
 @pytest.mark.asyncio
-@pytest.mark.django_db(databases=["default", "default_alias"])
+@pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
 async def test_message_manager_too_many_retries_on_send_failure(settings):
     flaky = FlakySendStubTransport("flaky", messages=[], fail_times=3)
     message_manager = MessageManager(
@@ -266,7 +270,7 @@ async def test_message_manager_too_many_retries_on_send_failure(settings):
                 subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
             )
             .acount()
-        ) >= 1
+        ) == 1
 
     await wait_until_async(_acount)
 
@@ -274,6 +278,75 @@ async def test_message_manager_too_many_retries_on_send_failure(settings):
         counter_value(VALIDATOR_FC_MESSAGE_SEND_FAILURES, {"message_type": "V0Heartbeat"})
         == failed_before + 1
     )
+    assert await _acount()
+
+    await message_manager.stop()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
+async def test_message_manager_unknown_local_message_type(settings):
+    stub = StubTransport("stub", messages=[])
+
+    message_manager = MessageManager(connection_manager=MockConnectionManager(transport_layer=stub))
+    message_manager.WAIT_ON_ERROR_INTERVAL = 0.01
+
+    class BogusMessage(BaseModel):
+        prop: str = "test"
+
+    await message_manager.start()
+    # Messages apparently get los if they're sent before the message manager spins up completely
+    await asyncio.sleep(1)
+
+    # Send local messages on both channels manager listens to
+    layer = get_channel_layer()
+    await layer.send(JOB_STATUS_UPDATE_CHANNEL, BogusMessage().model_dump(mode="json"))
+    await asyncio.sleep(0.1)
+    await layer.send(JOB_STATUS_UPDATE_CHANNEL, V0Heartbeat().model_dump(mode="json"))
+    await asyncio.sleep(0.1)
+
+    async def _acount() -> int:
+        return (
+            await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS)
+            .filter(
+                type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+            )
+            .acount()
+        ) == 2
+
+    await wait_until_async(_acount)
+    assert await _acount()
+
+    await message_manager.stop()
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
+async def test_message_manager_unknown_transport_layer_message_type(settings):
+    # Prepare incoming messages over transport layer
+    class BogusMessage(BaseModel):
+        prop: str = "test"
+    stub = StubTransport("stub", messages=[BogusMessage().model_dump_json()])
+
+    message_manager = MessageManager(connection_manager=MockConnectionManager(transport_layer=stub))
+
+    await message_manager.start()
+    await asyncio.sleep(1)
+
+    async def _acount() -> int:
+        return (
+            await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS)
+            .filter(
+                type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
+            )
+            .acount()
+        ) == 1
+
+    await wait_until_async(_acount)
     assert await _acount()
 
     await message_manager.stop()

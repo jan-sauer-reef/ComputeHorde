@@ -318,6 +318,11 @@ class MessageTypeException(Exception):
         super().__init__(f"Unknown message type: {message!r}")
 
 
+class MessageChannelException(Exception):
+    def __init__(self, message: str | bytes, channel: str) -> None:
+        super().__init__(f"Got a valid message ({message!r}) on an unexpected channel ({channel})")
+
+
 class MessageRetryLimitExceeded(Exception):
     def __init__(self, message: MessageWrapper) -> None:
         super().__init__(
@@ -490,10 +495,9 @@ class MessageManager(BaseComponent):
                     validated_message = await self._process_incoming_transport_layer_message(
                         message
                     )
-
-                VALIDATOR_FC_MESSAGES_RECEIVED.labels(
-                    message_type=type(validated_message).__name__
-                ).inc()
+                    VALIDATOR_FC_MESSAGES_RECEIVED.labels(
+                        message_type=type(validated_message).__name__
+                    ).inc()
 
                 # The transport_layer.receive method is blocking for the
                 # websockets transport layer but this might not be the case for
@@ -651,7 +655,7 @@ class MessageManager(BaseComponent):
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
 
-    async def _process_incoming_local_message(self, msg: dict[str, Any]) -> BaseModel:
+    async def _process_incoming_local_message(self, msg: dict[str, Any], channel: str) -> None:
         """
         Validates a message from the default Django channel and adds it to the
         message queue.
@@ -667,14 +671,18 @@ class MessageManager(BaseComponent):
         except pydantic.ValidationError:
             pass
         else:
-            return job_status_update
+            if channel != JOB_STATUS_UPDATE_CHANNEL:
+                raise MessageChannelException(msg, channel)
+            await self._enqueue_message(job_status_update)
 
         try:
             heartbeat: V0Heartbeat = V0Heartbeat.model_validate(msg)
         except pydantic.ValidationError:
             pass
         else:
-            return heartbeat
+            if channel != HEARTBEAT_CHANNEL:
+                raise MessageChannelException(msg, channel)
+            await self._enqueue_message(heartbeat)
 
         raise MessageTypeException(str(msg))
 
@@ -688,12 +696,11 @@ class MessageManager(BaseComponent):
                     channel, stop_event=self._stop_event
                 )
                 if msg_or_none is not None:
-                    validated_msg = await self._process_incoming_local_message(msg_or_none)
-                    await self._enqueue_message(validated_msg)
+                    await self._process_incoming_local_message(msg=msg_or_none, channel=channel)
             except asyncio.CancelledError:
                 self._stop_event.set()
                 break
-            except MessageTypeException as exc:
+            except (MessageTypeException, MessageChannelException) as exc:
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,

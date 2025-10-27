@@ -19,7 +19,7 @@ from .util import (
 )
 
 
-class FacilitatorClientJobRequestManager(BaseComponent):
+class JobRequestManager(BaseComponent):
     """
     Handles job requests and cheated job reports sent from the facilitator.
     """

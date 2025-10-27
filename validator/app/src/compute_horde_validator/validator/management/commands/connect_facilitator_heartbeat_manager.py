@@ -6,14 +6,14 @@ from asgiref.sync import async_to_sync
 from django.core.management.base import BaseCommand
 
 from compute_horde_validator.validator.organic_jobs.facilitator_client.heartbeat_manager import (
-    FacilitatorClientHeartbeatManager,
+    HeartbeatManager,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    HEARTBEAT_MANAGER_CLASS = FacilitatorClientHeartbeatManager
+    HEARTBEAT_MANAGER_CLASS = HeartbeatManager
     STOP_EVENT = asyncio.Event()
 
     def __init__(self):

@@ -6,14 +6,14 @@ from asgiref.sync import async_to_sync
 from django.core.management.base import BaseCommand
 
 from compute_horde_validator.validator.organic_jobs.facilitator_client.job_request_manager import (
-    FacilitatorClientJobRequestManager,
+    JobRequestManager,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    JOB_HANDLER_CLASS = FacilitatorClientJobRequestManager
+    JOB_HANDLER_CLASS = JobRequestManager
     STOP_EVENT = asyncio.Event()
 
     def __init__(self):

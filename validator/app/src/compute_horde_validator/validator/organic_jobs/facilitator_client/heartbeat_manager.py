@@ -17,7 +17,7 @@ from .util import (
 )
 
 
-class FacilitatorClientHeartbeatManager(BaseComponent):
+class HeartbeatManager(BaseComponent):
     """
     Periodically sends heartbeat messages to the Django default channel layer.
     """
