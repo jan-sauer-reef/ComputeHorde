@@ -85,3 +85,6 @@ class SimulationTransport(AbstractTransport):
 
         self.receive_at_counter += send_before
         self.to_receive.append((self.receive_at_counter, sleep_before, message, side_effect))
+
+    def is_connected(self) -> bool:
+        return True

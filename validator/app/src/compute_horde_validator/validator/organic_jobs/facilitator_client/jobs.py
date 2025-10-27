@@ -1,9 +1,9 @@
-from celery import Task
-from compute_horde_validator.celery import app
 import logging
-from asgiref.sync import async_to_sync
+
 import pydantic
 import sentry_sdk
+from asgiref.sync import async_to_sync
+from celery import Task
 from compute_horde.fv_protocol.facilitator_requests import (
     OrganicJobRequest,
     V0JobCheated,
@@ -26,6 +26,7 @@ from compute_horde.protocol_messages import FailureContext
 from compute_horde_core.signature import SignedRequest, verify_signature
 from django.conf import settings
 
+from compute_horde_validator.celery import app
 from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
 from compute_horde_validator.validator.dynamic_config import aget_config
 from compute_horde_validator.validator.models import (
@@ -41,9 +42,10 @@ from compute_horde_validator.validator.tasks import (
     execute_organic_job_request_on_worker,
     slash_collateral_task,
 )
+
 from .constants import JOB_STATUS_UPDATE_CHANNEL
-from .util import safe_send_local_message, log_system_error_event
 from .exceptions import LocalChannelSendError
+from .util import safe_send_local_message
 
 logger = logging.getLogger(__name__)
 
@@ -112,9 +114,7 @@ async def process_miner_cheat_report(cheated_job_request: V0JobCheated) -> None:
     await job.asave()
 
     blacklist_time = await aget_config("DYNAMIC_JOB_CHEATED_BLACKLIST_TIME_SECONDS")
-    await blacklist.blacklist_miner(
-        job, MinerBlacklist.BlacklistReason.JOB_CHEATED, blacklist_time
-    )
+    await blacklist.blacklist_miner(job, MinerBlacklist.BlacklistReason.JOB_CHEATED, blacklist_time)
     await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
         type=SystemEvent.EventType.MINER_ORGANIC_JOB_FAILURE,
         subtype=SystemEvent.EventSubType.JOB_CHEATED,
@@ -135,10 +135,12 @@ class JobRequestTask(Task):
 
     Any task that uses this base class MUST have the job request as the first argument!
     """
-    def on_failure(self, exc, task_id, args, kwargs, einfo):
 
+    def on_failure(self, exc, task_id, args, kwargs, einfo):
         try:
-            job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(kwargs["job_request"] if kwargs else args[0])
+            job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(
+                kwargs["job_request"] if kwargs else args[0]
+            )
             job_uuid = job_request.uuid
         except pydantic.ValidationError:
             job_uuid = "UNKNOWN"  # uuid can't be parsed if the job request was mangled
@@ -175,7 +177,7 @@ class JobRequestTask(Task):
                 reason=wrapped_exc.reason,
                 context=wrapped_exc.context,
             )
-        
+
         try:
             async_to_sync(safe_send_local_message)(
                 channel=JOB_STATUS_UPDATE_CHANNEL,
@@ -204,7 +206,7 @@ class JobRequestTask(Task):
                 ),
             ),
         )
-    
+
     def _make_horde_failed_message(
         self,
         job_uuid: str,
@@ -236,7 +238,9 @@ def job_request_task(job_request: str) -> None:
         job_request (str): The job request as a JSON string.
     """
     try:
-        job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(job_request)
+        job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(
+            job_request
+        )
     except pydantic.ValidationError:
         raise InvalidJobRequestFormat(f"Invalid job request format: {job_request}")
 

@@ -1,19 +1,27 @@
 import asyncio
+
 import sentry_sdk
-from .util import stop_task_gracefully, interruptible_wait, safe_send_local_message
-from .constants import HEARTBEAT_CHANNEL
 from compute_horde.fv_protocol.validator_requests import V0Heartbeat
-from .exceptions import LocalChannelSendError
+
 from compute_horde_validator.validator.models import SystemEvent
-from .util import log_system_error_event
-from .metrics import VALIDATOR_FC_COMPONENT_STATE
+
 from .base import BaseComponent
+from .constants import HEARTBEAT_CHANNEL
+from .exceptions import LocalChannelSendError
+from .metrics import VALIDATOR_FC_COMPONENT_STATE
+from .util import (
+    interruptible_wait,
+    log_system_error_event,
+    safe_send_local_message,
+    stop_task_gracefully,
+)
 
 
 class HeartbeatManager(BaseComponent):
     """
     Periodically sends heartbeat messages to the Django default channel layer.
     """
+
     HEARTBEAT_INTERVAL = 60.0
 
     def __init__(self) -> None:
@@ -27,7 +35,9 @@ class HeartbeatManager(BaseComponent):
         """
         while self.is_running():
             try:
-                await interruptible_wait(timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=self.HEARTBEAT_INTERVAL, stop_event=self._stop_event
+                )
                 await safe_send_local_message(channel=HEARTBEAT_CHANNEL, message=V0Heartbeat())
             except asyncio.CancelledError:
                 self._stop_event.set()
@@ -62,13 +72,13 @@ class HeartbeatManager(BaseComponent):
         """Stops the heartbeat manager."""
         if not self.is_running():
             return
-        
+
         await super().stop()
 
         try:
             await stop_task_gracefully(self._heartbeat_loop_task)
             self._heartbeat_loop_task = None
         except Exception as exc:
-            self._logger.error("Error stopping heartbeat loop task: %s: %s", type(exc).__name__, exc)
-
-        
+            self._logger.error(
+                "Error stopping heartbeat loop task: %s: %s", type(exc).__name__, exc
+            )

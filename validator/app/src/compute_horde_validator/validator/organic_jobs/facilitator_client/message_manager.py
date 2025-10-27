@@ -1,9 +1,8 @@
 import asyncio
-from collections import deque
-import pydantic
 import time
-from pydantic import BaseModel
-from typing import Deque
+from collections import deque
+
+import pydantic
 import sentry_sdk
 from compute_horde.fv_protocol.facilitator_requests import (
     OrganicJobRequest,
@@ -14,31 +13,43 @@ from compute_horde.fv_protocol.validator_requests import (
     JobStatusUpdate,
     V0Heartbeat,
 )
-from .util import stop_task_gracefully, interruptible_wait, safe_send_local_message, interruptible_receive_local_message, log_system_error_event, interruptible_receive_transport_layer_message, cancel_and_await_task
+from pydantic import BaseModel
+
+from compute_horde_validator.validator.models import SystemEvent
+
+from .base import BaseComponent
+from .connection_manager import ConnectionManager
 from .constants import (
+    CHEATED_JOB_REPORT_CHANNEL,
+    HEARTBEAT_CHANNEL,
     JOB_REQUEST_CHANNEL,
     JOB_STATUS_UPDATE_CHANNEL,
-    HEARTBEAT_CHANNEL,
-    CHEATED_JOB_REPORT_CHANNEL,
     TRANSPORT_LAYER_POLL_INTERVAL,
     WAIT_ON_ERROR_INTERVAL,
 )
-from compute_horde_validator.validator.models import SystemEvent
 from .exceptions import LocalChannelSendError
-from .connection_manager import ConnectionManager
-from .base import BaseComponent
 from .metrics import (
     VALIDATOR_FC_COMPONENT_STATE,
     VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
-    VALIDATOR_FC_MESSAGES_SENT,
-    VALIDATOR_FC_MESSAGES_RECEIVED,
-    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
     VALIDATOR_FC_MESSAGE_SEND_DURATION,
+    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
+    VALIDATOR_FC_MESSAGES_RECEIVED,
+    VALIDATOR_FC_MESSAGES_SENT,
+)
+from .util import (
+    cancel_and_await_task,
+    interruptible_receive_local_message,
+    interruptible_receive_transport_layer_message,
+    interruptible_wait,
+    log_system_error_event,
+    safe_send_local_message,
+    stop_task_gracefully,
 )
 
 
 class MessageWrapper(BaseModel):
     """A simple wrapper around a message that allows for retry counting"""
+
     content: BaseModel
     retry_count: int = 0
     max_retries: int = 3
@@ -51,7 +62,9 @@ class MessageTypeException(Exception):
 
 class MessageRetryLimitExceeded(Exception):
     def __init__(self, message: MessageWrapper) -> None:
-        super().__init__(f"Failed to send message ({message.content}) after {message.retry_count} retries")
+        super().__init__(
+            f"Failed to send message ({message.content}) after {message.retry_count} retries"
+        )
 
 
 class MessageManager(BaseComponent):
@@ -61,11 +74,12 @@ class MessageManager(BaseComponent):
     Performs the following operations:
     - Manages queued messages to be sent to the facilitator via the transport
       layer
-    - Listens for messages from the facilitator and pushes them into the 
+    - Listens for messages from the facilitator and pushes them into the
       default Django channel layer
     - Subscribes to messages from the default Django channel layer and pushes
       them into the message queue to be sent to the facilitator.
     """
+
     MAX_MESSAGE_SEND_RETRIES = 5
     MSG_RETRY_DELAY = 5.0
     EMPTY_MSG_QUEUE_BACKOFF_INTERVAL = 1.0
@@ -79,10 +93,10 @@ class MessageManager(BaseComponent):
         """
         super().__init__()
         self.connection_manager = connection_manager
-        self._queue: Deque[MessageWrapper] = deque()
+        self._queue: deque[MessageWrapper] = deque()
         self._queue_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
-        
+
         self._transport_layer_listener_task: asyncio.Task | None = None
         self._message_sender_task: asyncio.Task | None = None
         self._heartbeat_listener_task: asyncio.Task | None = None
@@ -96,7 +110,7 @@ class MessageManager(BaseComponent):
         async with self._queue_lock:
             self._queue.append(wrapped_msg)
             VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(len(self._queue))
-	        
+
     async def _get_next_message(self) -> MessageWrapper | None:
         """
         Gets the oldest message in the queue (FIFO principle).
@@ -113,8 +127,8 @@ class MessageManager(BaseComponent):
                 return msg
             except IndexError:  # Empty queue
                 VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(0)
-                return None           
-        
+                return None
+
     async def _retry_message(self, message: MessageWrapper) -> None:
         """
         Inserts message into the front of the queue again to retry sending it.
@@ -128,7 +142,9 @@ class MessageManager(BaseComponent):
                 self._queue.appendleft(message)
                 VALIDATOR_FC_MESSAGE_QUEUE_LENGTH.set(len(self._queue))
             else:
-                VALIDATOR_FC_MESSAGE_SEND_FAILURES.labels(message_type=type(message.content).__name__).inc()
+                VALIDATOR_FC_MESSAGE_SEND_FAILURES.labels(
+                    message_type=type(message.content).__name__
+                ).inc()
                 raise MessageRetryLimitExceeded(message)
 
     async def _get_queue_length(self) -> int:
@@ -138,7 +154,7 @@ class MessageManager(BaseComponent):
 
     async def _process_incoming_transport_layer_message(self, message: str) -> BaseModel:
         """
-        Parses an incoming message from the transport layer and takes the 
+        Parses an incoming message from the transport layer and takes the
         appropriate action.
 
         Expects one of the following message types:
@@ -162,7 +178,9 @@ class MessageManager(BaseComponent):
             pass
         else:
             if response.status != "success":
-                self._logger.error("received error response from facilitator: %r", response.model_dump_json())
+                self._logger.error(
+                    "received error response from facilitator: %r", response.model_dump_json()
+                )
             return response
 
         try:
@@ -191,33 +209,37 @@ class MessageManager(BaseComponent):
 
     async def _listen_for_transport_layer_messages(self) -> None:
         """
-        Listens for messages from the transport layer and adds them to the 
+        Listens for messages from the transport layer and adds them to the
         appropriate Django channel.
         """
         while self.is_running():
             try:
-                # If transport layer isn't connected and authenticated, wait 
+                # If transport layer isn't connected and authenticated, wait
                 # (and hope) for ConnectionManager to (re-)establish the connection.
-                # This also ensures that the message manager doesn't accidentally 
+                # This also ensures that the message manager doesn't accidentally
                 # grab the authentication message
                 if not self.connection_manager.is_connected_and_authenticated():
-                    await interruptible_wait(timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event)
+                    await interruptible_wait(
+                        timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event
+                    )
                     continue
-                    
+
                 message = await interruptible_receive_transport_layer_message(
                     connection_manager=self.connection_manager,
                     stop_event=self._stop_event,
                 )
                 if message is not None:
-                    message =await self._process_incoming_transport_layer_message(message)
-                
+                    message = await self._process_incoming_transport_layer_message(message)
+
                 VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type=type(message).__name__).inc()
 
-                # The transport_layer.receive method is blocking for the 
+                # The transport_layer.receive method is blocking for the
                 # websockets transport layer but this might not be the case for
-                # other transport layers. To avoid excessive polling of the 
+                # other transport layers. To avoid excessive polling of the
                 # transport layer, an additional cool-down wait is included here.
-                await interruptible_wait(timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event
+                )
             except asyncio.CancelledError:
                 self._stop_event.set()
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
@@ -229,7 +251,9 @@ class MessageManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=self._logger,
                 )
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
             except MessageTypeException as exc:
                 await log_system_error_event(
                     message=str(exc),
@@ -238,7 +262,9 @@ class MessageManager(BaseComponent):
                     logger=self._logger,
                 )
                 VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type="unknown").inc()
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
@@ -247,12 +273,14 @@ class MessageManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=self._logger,
                 )
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
 
     async def _try_to_send_next_message(self) -> None:
         """
         Attempt to send the next message in the queue with retries.
-        
+
         Raises:
             MessageRetryLimitExceeded: If the message has reached the maximum number of retries.
         """
@@ -263,13 +291,22 @@ class MessageManager(BaseComponent):
             try:
                 send_task = None
                 start = time.monotonic()
-                send_task = asyncio.create_task(self.connection_manager.send(msg.content.model_dump_json()))
+                send_task = asyncio.create_task(
+                    self.connection_manager.send(msg.content.model_dump_json())
+                )
                 await asyncio.wait_for(send_task, timeout=self.TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT)
             except Exception as exc:
                 if send_task is None:
                     # Asyncio could fail in creating the send task itself which would be no fault of the connection itself and shoukdn't count against the message retries
-                    self._logger.error("Failed to create send task for message (%s) with error (%s: %s) and attempting to retry", msg.content, type(exc).__name__, exc)
-                    msg.retry_count -= 1  # Subtract so that when _retry_message increments, it's net 0
+                    self._logger.error(
+                        "Failed to create send task for message (%s) with error (%s: %s) and attempting to retry",
+                        msg.content,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    msg.retry_count -= (
+                        1  # Subtract so that when _retry_message increments, it's net 0
+                    )
                 else:
                     await cancel_and_await_task(send_task)
 
@@ -277,14 +314,18 @@ class MessageManager(BaseComponent):
 
                 self._logger.debug(
                     "Failed to send message (%s) with error (%s: %s) and attempting to retry",
-                    msg.content, type(exc).__name__, exc
+                    msg.content,
+                    type(exc).__name__,
+                    exc,
                 )
 
                 # Brief wait to allow whatever problem prevented the message to be sent
                 # to (hopefully) be fixed elsewhere
                 await interruptible_wait(timeout=self.MSG_RETRY_DELAY, stop_event=self._stop_event)
             else:
-                VALIDATOR_FC_MESSAGE_SEND_DURATION.labels(message_type=type(msg.content).__name__).observe(time.monotonic() - start)
+                VALIDATOR_FC_MESSAGE_SEND_DURATION.labels(
+                    message_type=type(msg.content).__name__
+                ).observe(time.monotonic() - start)
                 VALIDATOR_FC_MESSAGES_SENT.labels(
                     message_type=type(msg.content).__name__,
                     retries=msg.retry_count,
@@ -307,15 +348,19 @@ class MessageManager(BaseComponent):
         through the transport layer.
         """
         while self.is_running():
-            try:    
+            try:
                 if await self._get_queue_length() == 0:
-                    await interruptible_wait(timeout=self.EMPTY_MSG_QUEUE_BACKOFF_INTERVAL, stop_event=self._stop_event)
+                    await interruptible_wait(
+                        timeout=self.EMPTY_MSG_QUEUE_BACKOFF_INTERVAL, stop_event=self._stop_event
+                    )
                     continue
 
                 # If transport layer isn't connected, wait (and hope) for
                 # ConnectionManager to re-establish the connection.
                 if not self.connection_manager.is_connected_and_authenticated():
-                    await interruptible_wait(timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event)
+                    await interruptible_wait(
+                        timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event
+                    )
                     continue
 
                 await self._try_to_send_next_message()
@@ -330,7 +375,9 @@ class MessageManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
                     logger=self._logger,
                 )
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
@@ -339,7 +386,9 @@ class MessageManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=self._logger,
                 )
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
 
     async def _process_incoming_local_message(self, msg: dict) -> None:
         """
@@ -363,7 +412,7 @@ class MessageManager(BaseComponent):
             pass
         if outgoing is None:
             raise MessageTypeException(msg)
-        
+
         await self._enqueue_message(outgoing)
 
     async def _listen_for_local_messages(self, channel: str) -> None:
@@ -372,7 +421,9 @@ class MessageManager(BaseComponent):
         """
         while self.is_running():
             try:
-                msg_or_none = await interruptible_receive_local_message(channel, stop_event=self._stop_event)
+                msg_or_none = await interruptible_receive_local_message(
+                    channel, stop_event=self._stop_event
+                )
                 if msg_or_none is not None:
                     await self._process_incoming_local_message(msg_or_none)
             except asyncio.CancelledError:
@@ -385,7 +436,9 @@ class MessageManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
                     logger=self._logger,
                 )
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
@@ -394,20 +447,28 @@ class MessageManager(BaseComponent):
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
                     logger=self._logger,
                 )
-                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
-    
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
+
     async def start(self) -> None:
         """Starts the message manager."""
         if self.is_running():
             return
-            
+
         await super().start()
 
-        self._transport_layer_listener_task = asyncio.create_task(self._listen_for_transport_layer_messages())
-        self._heartbeat_listener_task = asyncio.create_task(self._listen_for_local_messages(HEARTBEAT_CHANNEL))
-        self._job_status_update_listener_task = asyncio.create_task(self._listen_for_local_messages(JOB_STATUS_UPDATE_CHANNEL))
+        self._transport_layer_listener_task = asyncio.create_task(
+            self._listen_for_transport_layer_messages()
+        )
+        self._heartbeat_listener_task = asyncio.create_task(
+            self._listen_for_local_messages(HEARTBEAT_CHANNEL)
+        )
+        self._job_status_update_listener_task = asyncio.create_task(
+            self._listen_for_local_messages(JOB_STATUS_UPDATE_CHANNEL)
+        )
         self._message_sender_task = asyncio.create_task(self._send_messages())
-        
+
     async def stop(self) -> None:
         """
         Ends message manager. Attempts to send all remaining messages to clear
@@ -415,33 +476,41 @@ class MessageManager(BaseComponent):
         """
         if not self.is_running():
             return
-        
+
         await super().stop()
 
         # Stop listening for local messages first to prevent messages getting
-        # stuck in the queue after the message sender task has been shut off 
+        # stuck in the queue after the message sender task has been shut off
         # --> messages may now get stuck in the Redis queue
         try:
             await stop_task_gracefully(self._job_status_update_listener_task)
         except Exception as exc:
-            self._logger.error("Error stopping job status update listener task: %s: %s", type(exc).__name__, exc)
+            self._logger.error(
+                "Error stopping job status update listener task: %s: %s", type(exc).__name__, exc
+            )
 
         try:
             await stop_task_gracefully(self._heartbeat_listener_task)
         except Exception as exc:
-            self._logger.error("Error stopping heartbeat listener task: %s: %s", type(exc).__name__, exc)
+            self._logger.error(
+                "Error stopping heartbeat listener task: %s: %s", type(exc).__name__, exc
+            )
 
         try:
             await stop_task_gracefully(self._transport_layer_listener_task)
         except Exception as exc:
-            self._logger.error("Error stopping transport layer listener task: %s: %s", type(exc).__name__, exc)
+            self._logger.error(
+                "Error stopping transport layer listener task: %s: %s", type(exc).__name__, exc
+            )
 
         try:
             await stop_task_gracefully(self._message_sender_task)
         except Exception as exc:
-            self._logger.error("Error stopping message sender task: %s: %s", type(exc).__name__, exc)
+            self._logger.error(
+                "Error stopping message sender task: %s: %s", type(exc).__name__, exc
+            )
 
-        # Attempt to clear the queue one final time. This may have already happened 
+        # Attempt to clear the queue one final time. This may have already happened
         # in the finally-block of the _send_messages method but if there are too many
         # messages this may have cancelled too soon.
         await self._send_remaining_messages()

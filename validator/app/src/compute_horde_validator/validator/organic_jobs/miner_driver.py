@@ -48,14 +48,20 @@ from compute_horde_validator.validator.models import (
     OrganicJob,
     SystemEvent,
 )
+from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import (
+    JOB_STATUS_UPDATE_CHANNEL,
+)
+from compute_horde_validator.validator.organic_jobs.facilitator_client.exceptions import (
+    LocalChannelSendError,
+)
+from compute_horde_validator.validator.organic_jobs.facilitator_client.util import (
+    safe_send_local_message,
+)
 from compute_horde_validator.validator.organic_jobs.miner_client import MinerClient
 from compute_horde_validator.validator.receipts.default import receipts
 from compute_horde_validator.validator.routing.default import routing
 from compute_horde_validator.validator.routing.types import JobRoute, MinerIncidentType
 from compute_horde_validator.validator.utils import TRUSTED_MINER_FAKE_KEY
-from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import JOB_STATUS_UPDATE_CHANNEL
-from compute_horde_validator.validator.organic_jobs.facilitator_client.util import safe_send_local_message
-from compute_horde_validator.validator.organic_jobs.facilitator_client.exceptions import LocalChannelSendError
 
 logger = logging.getLogger(__name__)
 

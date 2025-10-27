@@ -1,16 +1,19 @@
-import logging
-
 import asyncio
+import logging
 import signal
+
 from asgiref.sync import async_to_sync
+from compute_horde.transport import WSTransport
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from compute_horde_validator.validator.organic_jobs.facilitator_client import (
-    MessageManager,
+from compute_horde_validator.validator.organic_jobs.facilitator_client.connection_manager import (
     ConnectionManager,
 )
-from compute_horde.transport import WSTransport
+from compute_horde_validator.validator.organic_jobs.facilitator_client.message_manager import (
+    MessageManager,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,10 +35,14 @@ class Command(BaseCommand):
             "starting connection manager and message manager"
         )
 
-        transport_layer = self.TRANSPORT_LAYER_CLASS(name="facilitator", url=settings.FACILITATOR_URI)
-        connection_manager = self.CONNECTION_MANAGER_CLASS(keypair=keypair, transport_layer=transport_layer)
+        transport_layer = self.TRANSPORT_LAYER_CLASS(
+            name="facilitator", url=settings.FACILITATOR_URI
+        )
+        connection_manager = self.CONNECTION_MANAGER_CLASS(
+            keypair=keypair, transport_layer=transport_layer
+        )
         message_manager = self.MESSAGE_MANAGER_CLASS(connection_manager=connection_manager)
-        
+
         async def lifecycle():
             self.STOP_EVENT.clear()
             await connection_manager.start()
@@ -43,7 +50,7 @@ class Command(BaseCommand):
             await self.STOP_EVENT.wait()
             await message_manager.stop()
             await connection_manager.stop()
-        
+
         task = asyncio.create_task(lifecycle())
         await task
 
@@ -51,6 +58,3 @@ class Command(BaseCommand):
         """Set global stop event to trigger the shutdown of the components."""
         if not self.STOP_EVENT.is_set():
             self.STOP_EVENT.set()
-
-
-        
