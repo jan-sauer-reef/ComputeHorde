@@ -1,16 +1,14 @@
 import asyncio
 import pydantic
-import logging
+import sentry_sdk
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0JobCheated
 from compute_horde_validator.validator.models import SystemEvent
-from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL, POLL_INTERVAL
+from .constants import JOB_REQUEST_CHANNEL, CHEATED_JOB_REPORT_CHANNEL, WAIT_ON_ERROR_INTERVAL
 from .util import interruptible_receive_local_message, log_system_error_event, stop_task_gracefully, interruptible_wait
 from .jobs import job_request_task, process_miner_cheat_report
 from .exceptions import LocalChannelReceiveError
 from .base import BaseComponent
 from .metrics import VALIDATOR_FC_COMPONENT_STATE
-
-logger = logging.getLogger(__name__)
 
 
 class FacilitatorClient(BaseComponent):
@@ -42,25 +40,26 @@ class FacilitatorClient(BaseComponent):
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
             except pydantic.ValidationError:
                 await log_system_error_event(
                     message=f"Invalid job request received from facilitator: {msg_or_none}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-                    logger=logger,
+                    logger=self._logger,
                 )
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
+                sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
                     message=f"Error handling job request: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
 
     async def _cheated_job_report_handler(self) -> None:
         """
@@ -81,25 +80,26 @@ class FacilitatorClient(BaseComponent):
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
             except pydantic.ValidationError:
                 await log_system_error_event(
                     message=f"Invalid cheated job report received from facilitator: {msg_or_none}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-                    logger=logger,
+                    logger=self._logger,
                 )
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
+                sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
                     message=f"Error handling cheated job report: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
 
     async def start(self) -> None:
         """Starts the main client."""
@@ -122,10 +122,10 @@ class FacilitatorClient(BaseComponent):
             await stop_task_gracefully(self._job_request_listener_task)
             self._job_request_listener_task = None
         except Exception as exc:
-            logger.error("Error stopping job request listener task: %s: %s", type(exc).__name__, exc)
+            self._logger.error("Error stopping job request listener task: %s: %s", type(exc).__name__, exc)
 
         try:
             await stop_task_gracefully(self._cheated_job_report_listener_task)
             self._cheated_job_report_listener_task = None
         except Exception as exc:
-            logger.error("Error stopping cheated job report listener task: %s: %s", type(exc).__name__, exc)
+            self._logger.error("Error stopping cheated job report listener task: %s: %s", type(exc).__name__, exc)

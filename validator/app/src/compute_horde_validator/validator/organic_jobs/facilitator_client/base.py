@@ -2,7 +2,6 @@ from abc import ABC
 import logging
 import asyncio
 import time
-from .constants import POLL_INTERVAL
 from .metrics import (
     VALIDATOR_FC_COMPONENT_STATE,
     VALIDATOR_FC_COMPONENT_UPTIME, 
@@ -14,6 +13,9 @@ class BaseComponent(ABC):
     """
     Base class for all facilitator client components.
     """
+
+    UPTIME_UPDATE_INTERVAL = 1.0
+
     def __init__(self) -> None:
         self._start_time = None
         self._stop_event = asyncio.Event()
@@ -35,7 +37,7 @@ class BaseComponent(ABC):
             if self._start_time is not None:
                 uptime = time.monotonic() - self._start_time
                 VALIDATOR_FC_COMPONENT_UPTIME.labels(component=self.name).set(uptime)
-            await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+            await interruptible_wait(timeout=self.UPTIME_UPDATE_INTERVAL, stop_event=self._stop_event)
     
     def is_running(self) -> bool:
         """Checks if the component is running."""

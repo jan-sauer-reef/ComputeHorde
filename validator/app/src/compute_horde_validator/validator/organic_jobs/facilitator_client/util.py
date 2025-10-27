@@ -4,7 +4,7 @@ import asyncio
 import logging
 from pydantic import BaseModel
 from channels.layers import get_channel_layer
-from .constants import LOCAL_MESSAGE_SEND_TIMEOUT, GRACEFULLY_STOP_TIMEOUT
+from .constants import GRACEFULLY_STOP_TIMEOUT
 from compute_horde.transport import AbstractTransport
 from typing import Callable, Awaitable, TypeVar
 from .exceptions import LocalChannelReceiveError, TransportLayerReceiveError, LocalChannelSendError
@@ -83,7 +83,7 @@ async def interruptible_wait(timeout: float = 1.0, stop_event: asyncio.Event | N
     await cancel_and_await_task(interrupt_task)
 
 
-async def safe_send_local_message(channel: str, message: BaseModel) -> None:
+async def safe_send_local_message(channel: str, message: BaseModel, timeout: float = 10.0) -> None:
     """
     Sends a message via the default Django channel layer and includes a timeout
     to ensure that functions that send messages don't hang indefinitely.
@@ -91,13 +91,14 @@ async def safe_send_local_message(channel: str, message: BaseModel) -> None:
     Args:
         channel (str): The channel over which to send the message.
         message (BaseModel): The message to send.
-
+        timeout (float): The timeout in seconds. Defaults to 10.0 seconds.
+        
     Raises:
         LocalChannelSendError: If an error occurs while sending the message.
     """
     try:
         send_task = asyncio.create_task(get_channel_layer().send(channel, message.model_dump(mode="json")))
-        await asyncio.wait_for(send_task, timeout=LOCAL_MESSAGE_SEND_TIMEOUT)
+        await asyncio.wait_for(send_task, timeout=timeout)
     except Exception as exc:
         await cancel_and_await_task(send_task)
         raise LocalChannelSendError(cause=exc, channel=channel)

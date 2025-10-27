@@ -3,16 +3,14 @@ import asyncio
 import bittensor_wallet
 import pydantic
 import httpx
-import logging
-
+import sentry_sdk
 from django.conf import settings
-
 from compute_horde.transport import AbstractTransport, TransportConnectionError
 from compute_horde.fv_protocol.facilitator_requests import Error, Response
 from compute_horde.fv_protocol.validator_requests import V0AuthenticationRequest
 from compute_horde_validator.validator.models import SystemEvent
 from .util import stop_task_gracefully, interruptible_wait, cancel_and_await_task, log_system_error_event
-from .constants import POLL_INTERVAL
+from .constants import TRANSPORT_LAYER_POLL_INTERVAL, WAIT_ON_ERROR_INTERVAL
 from .base import BaseComponent
 from .metrics import (
     VALIDATOR_FC_COMPONENT_STATE,
@@ -23,7 +21,6 @@ from .metrics import (
     timing_decorator,
 )
 
-logger = logging.getLogger(__name__)
 
 class AuthenticationError(Exception):
     def __init__(self, reason: str, errors: list[Error]) -> None:
@@ -124,7 +121,7 @@ class ConnectionManager(BaseComponent):
             try:
                 await self._http_client.get(settings.DEBUG_CONNECT_FACILITATOR_WEBHOOK, timeout=self.WEBHOOK_TIMEOUT)
             except Exception:
-                logger.info("when calling connect webhook:", exc_info=True)
+                self._logger.info("when calling connect webhook:", exc_info=True)
 
     async def _establish_connection(self) -> None:
         """Connect and authenticate the transport layer and call an optional debug webhook."""
@@ -148,7 +145,7 @@ class ConnectionManager(BaseComponent):
             except asyncio.TimeoutError:
                 await cancel_and_await_task(close_task)
             except Exception as exc:
-                logger.error("Error closing HTTP client: %s: %s", type(exc).__name__, exc)
+                self._logger.error("Error closing HTTP client: %s: %s", type(exc).__name__, exc)
             finally:
                 self._http_client = None
 
@@ -160,7 +157,7 @@ class ConnectionManager(BaseComponent):
         except asyncio.TimeoutError:
             await cancel_and_await_task(stop_task)
         except Exception as exc:
-            logger.error("Error disconnecting transport layer: %s: %s", type(exc).__name__, exc)
+            self._logger.error("Error disconnecting transport layer: %s: %s", type(exc).__name__, exc)
 
     async def _monitor_connection(self) -> None:
         """
@@ -174,7 +171,7 @@ class ConnectionManager(BaseComponent):
                     VALIDATOR_FC_TRANSPORT_LAYER_STATE.set(1)
                     VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="success").inc()
                 # Reduce polling of transport layer
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=TRANSPORT_LAYER_POLL_INTERVAL, stop_event=self._stop_event)
             except asyncio.CancelledError:
                 self._stop_event.set()
                 await self._cleanup_resources()
@@ -185,28 +182,29 @@ class ConnectionManager(BaseComponent):
                     message=f"Transport layer connection error: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.TRANSPORT_CONNECTION_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
                 VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="transport_error").inc()
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
             except AuthenticationError as exc:
                 await log_system_error_event(
                     message=f"Authentication error: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
                 VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="auth_error").inc()
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
             except Exception as exc:
+                sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
                     message=f"Unexpected error: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=logger,
+                    logger=self._logger,
                 )
                 VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="unknown_error").inc()
-                await interruptible_wait(timeout=POLL_INTERVAL, stop_event=self._stop_event)
+                await interruptible_wait(timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event)
 
     def is_connected_and_authenticated(self) -> bool:
         """Checks if the connection is connected and authenticated."""
@@ -246,7 +244,7 @@ class ConnectionManager(BaseComponent):
             await stop_task_gracefully(task=self._main_task, timeout=15.0)
             self._main_task = None
         except Exception as exc:
-            logger.error("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
+            self._logger.error("Error in connection manager main loop: %s: %s", type(exc).__name__, exc)
 
         # Attempt to run cleanup again in case the monitor loop couldn't be stopped gracefully
         await self._cleanup_resources()

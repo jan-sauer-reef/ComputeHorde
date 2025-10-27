@@ -1,4 +1,5 @@
 import asyncio
+import sentry_sdk
 from .util import stop_task_gracefully, interruptible_wait, safe_send_local_message
 from .constants import HEARTBEAT_CHANNEL
 from compute_horde.fv_protocol.validator_requests import V0Heartbeat
@@ -40,6 +41,7 @@ class HeartbeatManager(BaseComponent):
                     logger=self._logger,
                 )
             except Exception as exc:
+                sentry_sdk.capture_exception(exc)
                 await log_system_error_event(
                     message=f"Error sending heartbeat message: {type(exc).__name__}: {exc}",
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,

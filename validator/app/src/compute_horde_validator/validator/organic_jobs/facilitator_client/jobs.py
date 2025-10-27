@@ -3,9 +3,11 @@ from compute_horde_validator.celery import app
 import logging
 from asgiref.sync import async_to_sync
 import pydantic
+import sentry_sdk
 from compute_horde.fv_protocol.facilitator_requests import (
     OrganicJobRequest,
     V0JobCheated,
+    V2JobRequest,
 )
 from compute_horde.fv_protocol.validator_requests import (
     HordeFailureDetails,
@@ -164,13 +166,14 @@ class JobRequestTask(Task):
                 context={"exception_type": type(exc).__qualname__},
             )
         else:
-            exc = HordeError.wrap_unhandled(exc)
+            sentry_sdk.capture_exception(exc)
+            wrapped_exc = HordeError.wrap_unhandled(exc)
             message = self._make_horde_failed_message(
                 job_uuid=job_uuid,
                 reported_by=JobParticipantType.VALIDATOR,
-                message=exc.message,
-                reason=exc.reason,
-                context=exc.context,
+                message=wrapped_exc.message,
+                reason=wrapped_exc.reason,
+                context=wrapped_exc.context,
             )
         
         try:
@@ -237,7 +240,9 @@ def job_request_task(job_request: str) -> None:
     except pydantic.ValidationError:
         raise InvalidJobRequestFormat(f"Invalid job request format: {job_request}")
 
-    async_to_sync(verify_request_or_fail)(job_request)
+    if isinstance(job_request, V2JobRequest):
+        logger.debug(f"Received signed job request: {job_request}")
+        async_to_sync(verify_request_or_fail)(job_request)
 
     # Notify facilitator that the job request has been received
     try:
