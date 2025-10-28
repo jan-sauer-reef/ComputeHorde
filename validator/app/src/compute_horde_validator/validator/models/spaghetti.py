@@ -1,16 +1,12 @@
 import logging
 import shlex
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
-from enum import IntEnum
-from os import urandom
 from typing import Self
 
-from asgiref.sync import sync_to_async
 from compute_horde.executor_class import DEFAULT_EXECUTOR_CLASS
 from compute_horde.subtensor import get_cycle_containing_block
-from compute_horde.utils import MIN_VALIDATOR_STAKE
 from compute_horde_core.output_upload import OutputUpload, ZipAndHttpPutUpload
 from compute_horde_core.volume import Volume, ZipUrlVolume
 from django.conf import settings
@@ -29,6 +25,7 @@ class SystemEvent(models.Model):
     """
 
     class EventType(models.TextChoices):
+        WEIGHT_SETTING_INFO = "WEIGHT_SETTING_INFO"
         WEIGHT_SETTING_SUCCESS = "WEIGHT_SETTING_SUCCESS"
         WEIGHT_SETTING_FAILURE = "WEIGHT_SETTING_FAILURE"
         # the two above are blankets for setting, committing and revealing
@@ -54,6 +51,7 @@ class SystemEvent(models.Model):
         COMPUTE_TIME_ALLOWANCE = "COMPUTE_TIME_ALLOWANCE"
         METAGRAPH_SYNCING = "METAGRAPH_SYNCING"
         COLLATERAL_SYNCING = "COLLATERAL_SYNCING"
+        JOB_ROUTING = "JOB_ROUTING"
 
     class EventSubType(models.TextChoices):
         SUCCESS = "SUCCESS"
@@ -123,6 +121,8 @@ class SystemEvent(models.Model):
         JOB_STATUS_UPDATE_ERROR = "JOB_STATUS_UPDATE_ERROR"
         TRANSPORT_CONNECTION_ERROR = "TRANSPORT_CONNECTION_ERROR"
         AUTHENTICATION_ERROR = "AUTHENTICATION_ERROR"
+        JOB_ROUTING_SUCCESS = "JOB_ROUTING_SUCCESS"
+        JOB_ROUTING_FAILURE = "JOB_ROUTING_FAILURE"
 
     type = models.CharField(max_length=255, choices=EventType.choices)
     subtype = models.CharField(max_length=255, choices=EventSubType.choices)
@@ -156,71 +156,6 @@ class MinerQueryset(models.QuerySet["Miner"]):
         return self.annotate(
             is_blacklisted=Exists(active_blacklist.filter(miner=OuterRef("id"))),
         ).filter(is_blacklisted=False)
-
-
-class MetagraphSnapshot(models.Model):
-    """
-    Snapshot of the metagraph at a specific block.
-    """
-
-    block = models.BigIntegerField()
-    updated_at = models.DateTimeField(auto_now_add=True)
-
-    alpha_stake = ArrayField(models.FloatField())
-    tao_stake = ArrayField(models.FloatField())
-    stake = ArrayField(models.FloatField())
-
-    uids = ArrayField(models.IntegerField())
-    hotkeys = ArrayField(models.CharField(max_length=255))
-    coldkeys = ArrayField(models.CharField(max_length=255), null=True, blank=True)
-
-    # current active miners
-    serving_hotkeys = ArrayField(models.CharField(max_length=255))
-
-    class SnapshotType(IntEnum):
-        LATEST = 0
-        CYCLE_START = 1
-
-    @classmethod
-    def get_latest(cls) -> "MetagraphSnapshot":
-        metagraph = MetagraphSnapshot.objects.get(id=cls.SnapshotType.LATEST)
-        if metagraph.updated_at < now() - timedelta(minutes=1):
-            msg = f"Tried to fetch stale metagraph last updated at: {metagraph.updated_at}"
-            logger.error(msg)
-            SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).create(
-                type=SystemEvent.EventType.METAGRAPH_SYNCING,
-                subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                long_description=msg,
-                data={"block": metagraph.block},
-            )
-            raise Exception(msg)
-        return metagraph
-
-    @classmethod
-    async def aget_latest(cls) -> "MetagraphSnapshot":
-        return await sync_to_async(cls.get_latest)()
-
-    @classmethod
-    def get_cycle_start(cls) -> "MetagraphSnapshot":
-        return MetagraphSnapshot.objects.get(id=cls.SnapshotType.CYCLE_START)
-
-    @classmethod
-    async def aget_cycle_start(cls) -> "MetagraphSnapshot":
-        return await sync_to_async(cls.get_cycle_start)()
-
-    def get_serving_hotkeys(self) -> list[str]:
-        """
-        Get the list of serving hotkeys.
-        :return: List of serving hotkeys.
-        """
-        return self.serving_hotkeys or []
-
-    def get_total_validator_stake(self) -> float:
-        """
-        Get the total stake for all hotkeys.
-        :return: The total stake.
-        """
-        return sum([s for s in self.stake if s > MIN_VALIDATOR_STAKE])
 
 
 # contains all neurons not only miners
@@ -398,7 +333,9 @@ class OrganicJob(JobBase):
     upload_results = models.JSONField(blank=True, default=dict)
     namespace = models.CharField(max_length=100, blank=True, null=True)
     cheated = models.BooleanField(default=False)
+    cheat_reported_at = models.DateTimeField(null=True)
     slashed = models.BooleanField(default=False)
+    slashed_at = models.DateTimeField(null=True)
     block = models.BigIntegerField(
         null=True, help_text="Block number on which this job is scheduled"
     )
@@ -461,40 +398,6 @@ class AdminJobRequest(models.Model):
         if self.output_url:
             return ZipAndHttpPutUpload(url=self.output_url)
         return None
-
-
-def get_random_salt() -> list[int]:
-    return list(urandom(8))
-
-
-class Weights(models.Model):
-    """
-    Weights set by validator at specific block.
-    This is used to verify the weights revealed by the validator later.
-    """
-
-    uids = ArrayField(models.IntegerField())
-    weights = ArrayField(models.IntegerField())
-    salt = ArrayField(models.IntegerField(), default=get_random_salt)
-    version_key = models.IntegerField()
-    block = models.BigIntegerField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    revealed_at = models.DateTimeField(null=True, default=None)
-
-    class Meta:
-        constraints = [
-            UniqueConstraint(fields=["block"], name="unique_block"),
-        ]
-        indexes = [
-            models.Index(fields=["created_at", "revealed_at"]),
-        ]
-
-    def save(self, *args, **kwargs) -> None:
-        assert len(self.uids) == len(self.weights), "Length of uids and weights should be the same"
-        super().save(*args, **kwargs)
-
-    def __str__(self) -> str:
-        return str(self.weights)
 
 
 class PromptSeries(models.Model):

@@ -97,18 +97,24 @@ async def process_miner_cheat_report(cheated_job_request: V0JobCheated) -> None:
         return
 
     job.cheated = True
-    await job.asave()
+    job.cheat_reported_at = now()
+    await job.asave(update_fields=["cheated", "cheat_reported_at"])
 
     blacklist_time = await aget_config("DYNAMIC_JOB_CHEATED_BLACKLIST_TIME_SECONDS")
     await blacklist.blacklist_miner(job, MinerBlacklist.BlacklistReason.JOB_CHEATED, blacklist_time)
+
+    event_data = {
+        "job_uuid": str(job.job_uuid),
+        "miner_hotkey": job.miner.hotkey,
+        "trusted_job_uuid": cheated_job_request.trusted_job_uuid,
+        "cheat_details": cheated_job_request.details,
+    }
+
     await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
         type=SystemEvent.EventType.MINER_ORGANIC_JOB_FAILURE,
         subtype=SystemEvent.EventSubType.JOB_CHEATED,
         long_description="Job was reported as cheated",
-        data={
-            "job_uuid": str(job.job_uuid),
-            "miner_hotkey": job.miner.hotkey,
-        },
+        data=event_data,
     )
 
     if not job.slashed:

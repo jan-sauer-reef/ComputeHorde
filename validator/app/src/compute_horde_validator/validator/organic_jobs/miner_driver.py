@@ -17,9 +17,11 @@ from compute_horde.fv_protocol.validator_requests import (
 )
 from compute_horde.job_errors import HordeError
 from compute_horde.miner_client.organic import (
+    MinerConnectionFailed,
     MinerRejectedJob,
     MinerReportedHordeFailed,
     MinerReportedJobFailed,
+    MinerTimedOut,
     OrganicJobDetails,
     execute_organic_job_on_miner,
 )
@@ -43,7 +45,6 @@ from compute_horde_validator.validator.allowance.default import allowance
 from compute_horde_validator.validator.dynamic_config import aget_config
 from compute_horde_validator.validator.models import (
     AdminJobRequest,
-    MetagraphSnapshot,
     Miner,
     OrganicJob,
     SystemEvent,
@@ -64,6 +65,10 @@ from compute_horde_validator.validator.routing.types import JobRoute, MinerIncid
 from compute_horde_validator.validator.utils import TRUSTED_MINER_FAKE_KEY
 
 logger = logging.getLogger(__name__)
+
+
+def _get_current_block() -> int:
+    return allowance().get_current_block()
 
 
 def status_update_from_success(job: OrganicJob) -> JobStatusUpdate:
@@ -173,10 +178,6 @@ async def _dummy_notify_callback(_: JobStatusUpdate) -> None:
     pass
 
 
-async def _get_current_block() -> int:
-    return (await MetagraphSnapshot.aget_latest()).block
-
-
 async def execute_organic_job_request(
     job_request: OrganicJobRequest, job_route: JobRoute
 ) -> OrganicJob:
@@ -203,7 +204,7 @@ async def execute_organic_job_request(
     if settings.DEBUG_USE_MOCK_BLOCK_NUMBER:
         block = 5136476 + int((time.time() - 1742076533) / 12)
     else:
-        block = await _get_current_block()
+        block = await sync_to_async(_get_current_block, thread_sensitive=False)()
 
     miner = await Miner.objects.aget(hotkey=job_route.miner.hotkey_ss58)
     job = await OrganicJob.objects.acreate(
@@ -309,6 +310,7 @@ async def drive_organic_job(
         docker_image=job_request.docker_image,
         docker_run_options_preset="nvidia_all" if job_request.use_gpu else "none",
         docker_run_cmd=job_request.get_args(),
+        env=job_request.env if isinstance(job_request.env, dict) else {},
         total_job_timeout=job_request.timeout
         if isinstance(job_request, AdminJobRequest)
         else OrganicJobDetails.total_job_timeout,
@@ -458,6 +460,19 @@ async def drive_organic_job(
             long_description=failure.msg.message,
         )
         status_update = status_update_from_miner_horde_failure(job, failure)
+        await notify_callback(status_update)
+
+    except (MinerConnectionFailed, MinerTimedOut) as e:
+        comment = str(e)
+        logger.warning(comment)
+        job.status = OrganicJob.Status.FAILED
+        job.comment = comment
+        await job.asave()
+        event_subtype = _horde_event_subtype_map.get(
+            e.reason, SystemEvent.EventSubType.GENERIC_ERROR
+        )
+        await save_event(subtype=event_subtype, long_description=comment)
+        status_update = status_update_from_horde_error(job, e)
         await notify_callback(status_update)
 
     except Exception as e:

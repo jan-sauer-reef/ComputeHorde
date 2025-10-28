@@ -23,16 +23,17 @@ from compute_horde_validator.validator.allowance.types import (
     Miner as AllowanceMiner,
 )
 from compute_horde_validator.validator.collateral.default import collateral
-from compute_horde_validator.validator.models import Miner, MinerIncident
+from compute_horde_validator.validator.models import Miner, MinerIncident, SystemEvent
 from compute_horde_validator.validator.receipts.default import receipts
 from compute_horde_validator.validator.routing.base import RoutingBase
-from compute_horde_validator.validator.routing.settings import MINER_RELIABILITY_WINDOW
+from compute_horde_validator.validator.routing.metrics import VALIDATOR_MINER_INCIDENT_REPORTED
 from compute_horde_validator.validator.routing.types import (
     AllMinersBusy,
     JobRoute,
     MinerIncidentType,
     NotEnoughCollateralException,
 )
+from compute_horde_validator.validator.routing.utils import weighted_shuffle
 from compute_horde_validator.validator.utils import TRUSTED_MINER_FAKE_KEY
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,11 @@ class Routing(RoutingBase):
             job_uuid=job_uuid,
             executor_class=executor_class.value,
         )
+        VALIDATOR_MINER_INCIDENT_REPORTED.labels(
+            incident_type=type.value,
+            miner_hotkey=hotkey_ss58address,
+            executor_class=executor_class.value,
+        ).inc()
 
 
 _routing_instance: Routing | None = None
@@ -163,17 +169,26 @@ def _pick_miner_for_job_v2(request: V2JobRequest) -> JobRoute:
     miners = {miner.hotkey_ss58: miner for miner in allowance().miners()}
     manifests = allowance().get_manifests()
 
-    per_executor_scores = _get_miners_reliability_score(
-        MINER_RELIABILITY_WINDOW, executor_class, manifests
+    reliability_score_per_hotkey = _get_miners_reliability_score(
+        reliability_window=timedelta(hours=float(config.DYNAMIC_ROUTING_RELIABILITY_WINDOW_HOURS)),
+        executor_class=executor_class,
+        manifests=manifests,
     )
 
-    def miner_sort_key(miner_tuple: tuple[str, float]) -> float:
-        # for same reliability, keep original available_allowance order (stable sort)
-        miner_hotkey, _available_allowance = miner_tuple
-        return per_executor_scores.get(miner_hotkey, 0)
+    suitable_hotkeys = [hotkey for hotkey, _ in suitable_miners]
+    hotkey_weights = [reliability_score_per_hotkey.get(hk, 0) for hk in suitable_hotkeys]
 
-    # Sort suitable miners by per-executor reliability (higher is better)
-    suitable_miners.sort(key=miner_sort_key, reverse=True)
+    # Default score of 0 - meaning no wrongdoings if we have no data.
+    # Note on score values:
+    # - any score lower than the cutoff, no matter how low, is only slightly worse than the cutoff value.
+    # - similarly, any amount over 0 is only slightly better than 0.
+    prioritized_hotkeys, probs = weighted_shuffle(
+        items=suitable_hotkeys,
+        weights=hotkey_weights,
+        # With steepness >5 there is a strong cutoff at ~center*2, hence center~=cutoff/2
+        center=float(config.DYNAMIC_ROUTING_RELIABILITY_SOFT_CUTOFF) / 2,
+        steepness=float(config.DYNAMIC_ROUTING_RELIABILITY_SEPARATION),
+    )
 
     # Get receipts instance once to avoid bound method issues with async_to_sync
     receipts_instance = receipts()
@@ -184,8 +199,25 @@ def _pick_miner_for_job_v2(request: V2JobRequest) -> JobRoute:
 
     busy_executors = async_to_sync(get_busy_executor_count)(executor_class, timezone.now())
 
+    system_event = SystemEvent(
+        type=SystemEvent.EventType.JOB_ROUTING,
+        long_description=f"Job {request.uuid} routing report",
+        data={
+            "job_uuid": request.uuid,
+            "executor_class": executor_class.value,
+            "current_block": current_block,
+            "executor_seconds": executor_seconds,
+            "collateral_threshold": collateral_threshold,
+            "reliability_scores": reliability_score_per_hotkey,
+            "pick_probabilities": dict(zip(prioritized_hotkeys, probs)),
+            "manifests": manifests,
+            "busy_executors": busy_executors,
+            "skipped_miners": {},  # Hotkey: reason; Filled in later
+        },
+    )
+
     # Iterate and try to reserve a miner
-    for miner_hotkey, _ in suitable_miners:
+    for miner_hotkey in prioritized_hotkeys:
         ongoing_jobs = busy_executors.get(miner_hotkey, 0)
 
         executor_dict = manifests.get(miner_hotkey, {})
@@ -196,6 +228,7 @@ def _pick_miner_for_job_v2(request: V2JobRequest) -> JobRoute:
                 f"Skipping miner {miner_hotkey} with {executor_count} executors "
                 f"{ongoing_jobs} ongoing jobs at [{current_block}]"
             )
+            system_event.data["skipped_miners"][miner_hotkey] = "busy"
             continue
 
         logger.info(
@@ -213,15 +246,20 @@ def _pick_miner_for_job_v2(request: V2JobRequest) -> JobRoute:
             )
 
             miner = miners[miner_hotkey]
-            Miner.objects.get_or_create(
-                address=miner.address,
-                ip_version=miner.ip_version,
-                port=miner.port,
+            Miner.objects.update_or_create(
                 hotkey=miner.hotkey_ss58,
+                defaults={
+                    "address": miner.address,
+                    "ip_version": miner.ip_version,
+                    "port": miner.port,
+                },
             )
             logger.info(
                 f"Successfully reserved miner {miner_hotkey} for job {request.uuid} with reservation ID {reservation_id}"
             )
+            system_event.subtype = SystemEvent.EventSubType.JOB_ROUTING_SUCCESS
+            system_event.data["picked_miner"] = miner_hotkey
+            system_event.save()
             return JobRoute(
                 miner=miner,
                 allowance_blocks=blocks,
@@ -233,10 +271,13 @@ def _pick_miner_for_job_v2(request: V2JobRequest) -> JobRoute:
             logger.debug(
                 f"Failed to reserve miner {miner_hotkey} for job {request.uuid}, trying next one."
             )
+            system_event.data["skipped_miners"][miner_hotkey] = "cannot reserve allowance"
             continue  # Try the next miner in the list
 
     # If the loop completes without returning, all suitable miners failed to be reserved
     logger.warning(f"All suitable miners were busy or failed to reserve for job {request.uuid}.")
+    system_event.subtype = SystemEvent.EventSubType.JOB_ROUTING_FAILURE
+    system_event.save()
     raise AllMinersBusy("Could not reserve any of the suitable miners.")
 
 

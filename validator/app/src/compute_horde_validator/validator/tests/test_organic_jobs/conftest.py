@@ -14,8 +14,6 @@ from compute_horde_core.executor_class import ExecutorClass
 from compute_horde_validator.validator.models import (
     Cycle,
     Miner,
-    MinerManifest,
-    SyntheticJobBatch,
 )
 from compute_horde_validator.validator.organic_jobs.facilitator_client.facilitator_connector import (
     FacilitatorClient,
@@ -39,18 +37,6 @@ def validator(settings):
 @pytest.fixture
 def cycle():
     return Cycle.objects.create(start=1, stop=2)
-
-
-@pytest.fixture(autouse=True)
-def manifest(miner, cycle):
-    batch = SyntheticJobBatch.objects.create(block=5, cycle=cycle)
-    return MinerManifest.objects.create(
-        miner=miner,
-        batch=batch,
-        executor_class=ExecutorClass.always_on__gpu_24gb,
-        executor_count=5,
-        online_executor_count=5,
-    )
 
 
 @pytest.fixture(autouse=True)

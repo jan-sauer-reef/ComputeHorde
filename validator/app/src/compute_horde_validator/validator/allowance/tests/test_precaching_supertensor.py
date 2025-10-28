@@ -37,8 +37,27 @@ def prepare_mocks():
                 return mockchain.get_block_timestamp(block_number)
 
             block_context.get_timestamp = get_timestamp
+            block_context.hash = f"mock_hash_{block_number}"
 
             yield block_context
+
+        async def get_state(self):
+            block_number = block_number_context.get()
+            validators = mockchain.list_validators(block_number, filter_=True)
+            total_stake = [0.0] * (max((v.uid for v in validators), default=0) + 1)
+            for validator in validators:
+                total_stake[validator.uid] = validator.stake
+
+            return {
+                "hotkeys": [v.hotkey for v in validators],
+                "coldkeys": [v.coldkey for v in validators],
+                "total_stake": total_stake,
+                "alpha_stake": [0.0] * len(total_stake),
+                "tao_stake": [0.0] * len(total_stake),
+            }
+
+        async def close(self):
+            return None
 
     with (
         mock.patch("turbobt.Bittensor", new=BittensorMock),
@@ -73,6 +92,9 @@ def test_precaching_supertensor_smoke_test():
             precaching_supertensor.list_neurons(1001)
         keep_trying_until_success_or_timeout(
             functools.partial(precaching_supertensor.get_block_timestamp, 1001)
+        )
+        keep_trying_until_success_or_timeout(
+            functools.partial(precaching_supertensor.list_neurons, 1001)
         )
         precaching_supertensor.list_neurons(1001)
 

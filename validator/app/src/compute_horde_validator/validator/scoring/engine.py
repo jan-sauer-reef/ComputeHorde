@@ -6,6 +6,10 @@ from django.conf import settings
 
 from compute_horde_validator.validator.dynamic_config import get_executor_class_weights
 from compute_horde_validator.validator.models import Miner
+from compute_horde_validator.validator.models.scoring.internal import (
+    MainHotkeyInfo,
+    MinerMainHotkey,
+)
 from compute_horde_validator.validator.scoring.calculations import (
     calculate_allowance_paid_job_scores,
 )
@@ -15,10 +19,6 @@ from compute_horde_validator.validator.scoring.exceptions import (
 from compute_horde_validator.validator.scoring.interface import ScoringEngine
 from compute_horde_validator.validator.scoring.main_hotkey_querying import (
     query_miner_main_hotkeys,
-)
-from compute_horde_validator.validator.scoring.models import (
-    MainHotkeyInfo,
-    MinerMainHotkey,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +62,8 @@ class DefaultScoringEngine(ScoringEngine):
         normalized_scores: dict[str, float] = {}
 
         for executor_class, executor_scores in scores_by_executor.items():
-            weight = executor_class_weights.get(executor_class, 1.0)
+            # no weight by default to avoid accidental score assignment to new executor classes
+            weight = executor_class_weights.get(executor_class, 0.0)
 
             final_executor_scores = self._apply_dancing(
                 executor_scores,

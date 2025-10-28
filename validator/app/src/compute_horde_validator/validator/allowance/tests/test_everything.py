@@ -230,7 +230,7 @@ def test_complete(caplog, configure_logs):
         }.items()
     )
 
-    assert len(get_metric_values_by_remaining_labels(VALIDATOR_MINER_MANIFEST_REPORT, {})) == 768
+    assert len(get_metric_values_by_remaining_labels(VALIDATOR_MINER_MANIFEST_REPORT, {})) == 1024
 
     assert get_metric_values_by_remaining_labels(VALIDATOR_BLOCK_DURATION, {}) == {"": 11.99}
 
@@ -248,7 +248,7 @@ def test_complete(caplog, configure_logs):
             )
 
     with set_block_number(1004):
-        assert "deregging_miner_247" in [n.hotkey_ss58 for n in allowance().neurons(block=1004)]
+        assert "deregging_miner_247" in [n.hotkey for n in allowance().neurons(block=1004)]
         assert "deregging_miner_247" in [
             el[0]
             for el in allowance().find_miners_with_allowance(
@@ -282,7 +282,7 @@ def test_complete(caplog, configure_logs):
 
     with set_block_number(1010):
         blocks.process_block_allowance_with_reporting(1010, supertensor_=supertensor(), live=True)
-        assert "deregging_miner_247" not in [n.hotkey_ss58 for n in allowance().neurons(block=1010)]
+        assert "deregging_miner_247" not in [n.hotkey for n in allowance().neurons(block=1010)]
         assert "deregging_miner_247" not in [
             el[0]
             for el in allowance().find_miners_with_allowance(
@@ -410,7 +410,7 @@ def test_complete(caplog, configure_logs):
         json.loads((pathlib.Path(__file__).parent / "allowance_after_100_blocks.json").read_text())
     )
 
-    assert len(get_metric_values_by_remaining_labels(VALIDATOR_ALLOWANCE_CHECKPOINT, {})) == 2898
+    assert len(get_metric_values_by_remaining_labels(VALIDATOR_ALLOWANCE_CHECKPOINT, {})) == 2904
     allowance_after_100_blocks = allowance().find_miners_with_allowance(
         1.0, ExecutorClass.always_on__llm__a6000, 1101
     )
@@ -489,16 +489,16 @@ def test_complete(caplog, configure_logs):
 
     assert blocks_ == list(range(379, 1100))
 
-    assert BlockAllowance.objects.count() == 5041428
-    assert AllowanceMinerManifest.objects.count() == 4593
+    assert BlockAllowance.objects.count() == 6721904
+    assert AllowanceMinerManifest.objects.count() == 6124
     assert Block.objects.count() == 1101
     assert AllowanceBooking.objects.count() == 1
 
     with set_block_number(2906):
         evict_old_data()
 
-    assert BlockAllowance.objects.count() == 1626900
-    assert AllowanceMinerManifest.objects.count() == 4593
+    assert BlockAllowance.objects.count() == 2169200
+    assert AllowanceMinerManifest.objects.count() == 6124
     assert Block.objects.count() == 360
     assert AllowanceBooking.objects.count() == 1
 

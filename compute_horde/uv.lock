@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.11.*"
 
 [[package]]
@@ -530,7 +530,7 @@ type-check = [
 
 [[package]]
 name = "compute-horde-sdk"
-version = "0.0.16"
+version = "0.0.17"
 source = { editable = "../compute_horde_sdk" }
 dependencies = [
     { name = "aiohttp" },

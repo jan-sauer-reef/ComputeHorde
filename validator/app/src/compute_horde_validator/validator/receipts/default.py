@@ -7,7 +7,9 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
 import aiohttp
+from asgiref.sync import sync_to_async
 from compute_horde.receipts.models import (
+    JobAcceptedReceipt,
     JobFinishedReceipt,
     JobStartedReceipt,
 )
@@ -27,9 +29,9 @@ from django.utils import timezone
 from prometheus_client import Counter, Gauge, Histogram
 from typing_extensions import deprecated
 
+from compute_horde_validator.validator.allowance.default import allowance
 from compute_horde_validator.validator.allowance.utils.supertensor import supertensor
 from compute_horde_validator.validator.dynamic_config import aget_config
-from compute_horde_validator.validator.models import MetagraphSnapshot, Miner
 from compute_horde_validator.validator.models.allowance.internal import Block
 
 from .base import ReceiptsBase
@@ -60,7 +62,9 @@ class Receipts(ReceiptsBase):
                 "receipttransfer_receipts_total", documentation="Number of transferred receipts"
             ),
             miners=Gauge(
-                "receipttransfer_miners", documentation="Number of miners to transfer from"
+                "receipttransfer_miners",
+                documentation="Number of miners to transfer from",
+                multiprocess_mode="livemostrecent",
             ),
             successful_transfers=Counter(
                 "receipttransfer_successful_transfers_total",
@@ -83,6 +87,7 @@ class Receipts(ReceiptsBase):
             catchup_pages_left=Gauge(
                 "receipttransfer_catchup_pages_left",
                 documentation="Pages waiting for catch-up",
+                multiprocess_mode="livemostrecent",
             ),
         )
 
@@ -113,13 +118,16 @@ class Receipts(ReceiptsBase):
 
         else:
             # 3rd, if no specific miners were specified, get from metagraph snapshot.
-            logger.info("Will fetch receipts from metagraph snapshot miners")
+            logger.info("Will fetch receipts from metagraph miners")
 
             async def miners():
-                snapshot = await MetagraphSnapshot.aget_latest()
-                serving_hotkeys = snapshot.serving_hotkeys
-                serving_miners = [m async for m in Miner.objects.filter(hotkey__in=serving_hotkeys)]
-                return [(m.hotkey, m.address, m.port) for m in serving_miners]
+                def load_miners() -> list[MinerInfo]:
+                    return [
+                        (miner.hotkey_ss58, miner.address, miner.port)
+                        for miner in allowance().miners()
+                    ]
+
+                return await sync_to_async(load_miners)()
 
         # IMPORTANT: This encompasses at least the current and the previous cycle.
         cutoff = timezone.now() - datetime.timedelta(hours=5)
@@ -272,15 +280,48 @@ class Receipts(ReceiptsBase):
             job_uuid=OuterRef("job_uuid"), timestamp__lte=at_time
         )
 
-        ongoing = starts_qs.annotate(has_finished=Exists(finishes)).filter(has_finished=False)
+        ongoing_started = starts_qs.annotate(has_finished=Exists(finishes)).filter(
+            has_finished=False
+        )
 
-        rows = [
-            row
-            async for row in ongoing.values("miner_hotkey")
+        started_counts = {
+            row["miner_hotkey"]: int(row["n"])
+            async for row in ongoing_started.values("miner_hotkey")
             .annotate(n=Count("id"))
             .values("miner_hotkey", "n")
-        ]
-        return {row["miner_hotkey"]: int(row["n"]) for row in rows}
+        }
+
+        valid_started_exists = JobStartedReceipt.objects.valid_at(at_time).filter(
+            executor_class=str(executor_class),
+            job_uuid=OuterRef("job_uuid"),
+        )
+
+        accepted_qs = (
+            JobAcceptedReceipt.objects.valid_at(at_time)
+            .filter(
+                Exists(
+                    JobStartedReceipt.objects.filter(
+                        job_uuid=OuterRef("job_uuid"),
+                        executor_class=str(executor_class),
+                    )
+                )
+            )
+            .filter(~Exists(finishes))
+            .filter(~Exists(valid_started_exists))
+        )
+
+        accepted_counts = {
+            row["miner_hotkey"]: int(row["n"])
+            async for row in accepted_qs.values("miner_hotkey")
+            .annotate(n=Count("id"))
+            .values("miner_hotkey", "n")
+        }
+
+        busy_counts: dict[str, int] = dict(started_counts)
+        for miner_hotkey, count in accepted_counts.items():
+            busy_counts[miner_hotkey] = busy_counts.get(miner_hotkey, 0) + count
+
+        return busy_counts
 
     async def _catch_up(
         self,
@@ -366,7 +407,7 @@ class Receipts(ReceiptsBase):
 
             # Sleep for the remainder of the time if any
             if elapsed < interval:
-                time.sleep(interval - elapsed)
+                await asyncio.sleep(interval - elapsed)
 
     async def _run_once(
         self,

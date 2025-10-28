@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   redis:
-    image: redis:6-alpine
+    image: redis:8.2-alpine
     command: redis-server --appendonly yes
     healthcheck:
       test: redis-cli ping
@@ -22,6 +22,19 @@ services:
       - POSTGRES_DB:postgres
     volumes:
       - db:/var/lib/postgresql/data
+    logging:
+      <<: *logging
+
+  pylon:
+    image: docker.io/backenddevelopersltd/bittensor-pylon:git-0d2c4f8d3888ef395abab239b39619af84119c94@sha256:65a14854cd95a79afbd1ecac1f4d1aec7ddc50b3f3b418e6443074e415e41885
+    init: true
+    restart: unless-stopped
+    env_file: ./.env
+    environment:
+      - AUTH_TOKEN=abc
+      - BITTENSOR_WALLET_PATH=/root/.bittensor/wallets
+    volumes:
+      - ${HOST_WALLET_DIR}:/root/.bittensor/wallets
     logging:
       <<: *logging
 
@@ -66,9 +79,11 @@ services:
     tmpfs: /run
     depends_on:
       - redis
+      - pylon
     links:
       - redis
       - db
+      - pylon
     logging:
       <<: *logging
     labels:

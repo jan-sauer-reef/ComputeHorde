@@ -101,7 +101,6 @@ PROMETHEUS_LATENCY_BUCKETS = (
     float("inf"),
 )
 
-
 MIDDLEWARE = [
     #  'django_prometheus.middleware.PrometheusBeforeMiddleware',
     "django.middleware.security.SecurityMiddleware",
@@ -113,7 +112,6 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     #  'django_prometheus.middleware.PrometheusAfterMiddleware',
 ]
-
 
 if DEBUG_TOOLBAR := env.bool("DEBUG_TOOLBAR", default=False):
     INTERNAL_IPS = [
@@ -143,6 +141,7 @@ CONSTANCE_CONFIG = {
         "Whether this validator is serving jobs and setting weights",
         bool,
     ),
+    "DYNAMIC_DUMMY": (0, "Dummy config for the purpose of testing", int),
     "DYNAMIC_MANIFEST_SCORE_MULTIPLIER": (
         1.05,
         "The bonus rate for miners changing their horde size",
@@ -289,7 +288,7 @@ CONSTANCE_CONFIG = {
         str,
     ),
     "DYNAMIC_EXECUTOR_CLASS_WEIGHTS": (
-        "spin_up-4min.gpu-24gb=99,always_on.llm.a6000=1",
+        "spin_up-4min.gpu-24gb=99,always_on.llm.a6000=1,always_on.test=0",
         (
             "Weights of executor classes that are used to normalize miners scores. "
             "Executor classes not mentioned here are not taken into account when scoring. "
@@ -437,6 +436,25 @@ CONSTANCE_CONFIG = {
         "Additional extension of the allowed block range when validating spendings (upper bound)",
         int,
     ),
+    "DYNAMIC_ROUTING_RELIABILITY_WINDOW_HOURS": (
+        24.0,
+        "Any misbehavior within this rolling window counts towards decreasing the reliability score.",
+        float,
+    ),
+    "DYNAMIC_ROUTING_RELIABILITY_SOFT_CUTOFF": (
+        -50.0,
+        "MUST be < 0."
+        "Miners with reliability scores near and below this are **very unlikely** to receive jobs, unless all other "
+        "miners are busy at the time. ",
+        float,
+    ),
+    "DYNAMIC_ROUTING_RELIABILITY_SEPARATION": (
+        5.0,
+        "Preferably >=5. "
+        "Determines how strongly miners closer to perfect reliability are preferred over those closer to the cutoff. "
+        "Translates to the steepness parameter of the shuffling function. See its documentation for details. ",
+        float,
+    ),
 }
 
 # Content Security Policy
@@ -461,7 +479,6 @@ if CSP_ENABLED := env.bool("CSP_ENABLED", default=False):
 
     CSP_BLOCK_ALL_MIXED_CONTENT = env.bool("CSP_BLOCK_ALL_MIXED_CONTENT", default=False)
     CSP_EXCLUDE_URL_PREFIXES = env.tuple("CSP_EXCLUDE_URL_PREFIXES", default=tuple())
-
 
 ROOT_URLCONF = "compute_horde_validator.urls"
 
@@ -505,11 +522,9 @@ DEFAULT_DB_ALIAS = (
 )
 DATABASES[DEFAULT_DB_ALIAS] = DATABASES["default"]
 
-
 if new_name := env.str("DEBUG_OVERRIDE_DATABASE_NAME", default=None):
     DATABASES["default"]["NAME"] = new_name
     DATABASES[DEFAULT_DB_ALIAS]["NAME"] = new_name
-
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -575,8 +590,8 @@ CELERY_COMPRESSION = "gzip"  # task compression
 CELERY_MESSAGE_COMPRESSION = "gzip"  # result compression
 CELERY_SEND_EVENTS = True  # needed for worker monitoring
 CELERY_BEAT_SCHEDULE = {
-    "sync_metagraph": {
-        "task": "compute_horde_validator.validator.tasks.sync_metagraph",
+    "sync_miners": {
+        "task": "compute_horde_validator.validator.miner_sync.sync_miners",
         "schedule": timedelta(seconds=10),
         "options": {
             "expires": timedelta(seconds=10).total_seconds(),
@@ -589,31 +604,8 @@ CELERY_BEAT_SCHEDULE = {
             "expires": timedelta(minutes=5).total_seconds(),
         },
     },
-    "schedule_synthetic_jobs": {
-        "task": "compute_horde_validator.validator.tasks.schedule_synthetic_jobs",
-        "schedule": timedelta(minutes=1),
-        "options": {
-            "expires": timedelta(minutes=1).total_seconds(),
-        },
-    },
-    "run_synthetic_jobs": {
-        "task": "compute_horde_validator.validator.tasks.run_synthetic_jobs",
-        "schedule": timedelta(seconds=env.int("DEBUG_RUN_SYNTHETIC_JOBS_SECONDS", default=30)),
-        "options": {
-            "expires": timedelta(
-                seconds=env.int("DEBUG_RUN_SYNTHETIC_JOBS_SECONDS", default=30)
-            ).total_seconds(),
-        },
-    },
-    "check_missed_synthetic_jobs": {
-        "task": "compute_horde_validator.validator.tasks.check_missed_synthetic_jobs",
-        "schedule": timedelta(minutes=10),
-        "options": {
-            "expires": timedelta(minutes=10).total_seconds(),
-        },
-    },
     "set_scores": {
-        "task": "compute_horde_validator.validator.tasks.set_scores",
+        "task": "compute_horde_validator.validator.scoring.tasks.set_scores",
         "schedule": crontab(
             minute=env("DEBUG_SET_SCORES_MINUTE", default="*/1"),
             hour=env("DEBUG_SET_SCORES_HOUR", default="*"),
@@ -623,7 +615,7 @@ CELERY_BEAT_SCHEDULE = {
         },
     },
     "reveal_scores": {
-        "task": "compute_horde_validator.validator.tasks.reveal_scores",
+        "task": "compute_horde_validator.validator.scoring.tasks.reveal_scores",
         "schedule": timedelta(minutes=1),
         "options": {
             "expires": timedelta(minutes=1).total_seconds(),
@@ -638,27 +630,6 @@ CELERY_BEAT_SCHEDULE = {
     },
     "fetch_dynamic_config": {
         "task": "compute_horde_validator.validator.tasks.fetch_dynamic_config",
-        "schedule": timedelta(minutes=5),
-        "options": {
-            "expires": timedelta(minutes=5).total_seconds(),
-        },
-    },
-    "llm_prompt_generation": {
-        "task": "compute_horde_validator.validator.tasks.llm_prompt_generation",
-        "schedule": timedelta(minutes=5),
-        "options": {
-            "expires": timedelta(minutes=5).total_seconds(),
-        },
-    },
-    "llm_prompt_sampling": {
-        "task": "compute_horde_validator.validator.tasks.llm_prompt_sampling",
-        "schedule": timedelta(minutes=30),
-        "options": {
-            "expires": timedelta(minutes=30).total_seconds(),
-        },
-    },
-    "llm_prompt_answering": {
-        "task": "compute_horde_validator.validator.tasks.llm_prompt_answering",
         "schedule": timedelta(minutes=5),
         "options": {
             "expires": timedelta(minutes=5).total_seconds(),
@@ -690,6 +661,13 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": timedelta(minutes=5),
         "options": {
             "expires": timedelta(minutes=5).total_seconds(),
+        },
+    },
+    "scan_archive_blocks_and_calculate_allowance": {
+        "task": "compute_horde_validator.validator.allowance.tasks.scan_archive_blocks_and_calculate_allowance",
+        "schedule": timedelta(minutes=1),
+        "options": {
+            "expires": timedelta(minutes=1).total_seconds(),
         },
     },
     "update_block_cache": {
@@ -797,6 +775,9 @@ LOGGING = {
 
 BITTENSOR_NETUID = env.int("BITTENSOR_NETUID")
 BITTENSOR_NETWORK = env.str("BITTENSOR_NETWORK")
+PYLON_HOST = "pylon"
+PYLON_PORT = 8000
+PYLON_AUTH_TOKEN = "abc"
 # This can be explicitly set to None, which will cause some backfilling operations to never succeed. Useful when running
 # on a private staging net etc.
 BITTENSOR_ARCHIVE_NETWORK = env.str("BITTENSOR_ARCHIVE_NETWORK", "archive")
@@ -870,8 +851,7 @@ DYNAMIC_CONFIG_ENV = env.str("DYNAMIC_CONFIG_ENV", default="prod")
 CONFIG_CONTRACT_ADDRESS = env.str(
     "CONFIG_CONTRACT_ADDRESS", default="0x6034a34677b7c715EA97ED25Ee6B2A8DcB7c641E"
 )
-USE_CONTRACT_CONFIG = env.bool("USE_CONTRACT_CONFIG", default=True)
-
+USE_CONTRACT_CONFIG = env.bool("USE_CONTRACT_CONFIG", default=False)
 
 # synthetic jobs are evenly distributed through the cycle, however
 # we start them from some offset because scheduling takes some time
