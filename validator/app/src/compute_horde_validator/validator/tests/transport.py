@@ -30,7 +30,7 @@ class SimulationTransport(AbstractTransport):
     async def start(self, *args, **kwargs):
         self.connected_flag.set()
 
-    async def stop(self): 
+    async def stop(self):
         self.connected_flag.clear()
 
     async def send(self, message: str) -> None:

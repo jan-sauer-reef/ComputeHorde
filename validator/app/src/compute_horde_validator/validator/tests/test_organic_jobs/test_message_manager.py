@@ -1,13 +1,13 @@
 import asyncio
 import json
 from typing import Any
-from pydantic import BaseModel
 
 import pytest
 from channels.layers import get_channel_layer
 from compute_horde.fv_protocol.facilitator_requests import Response
 from compute_horde.fv_protocol.validator_requests import JobStatusUpdate, V0Heartbeat
 from compute_horde.transport import StubTransport
+from pydantic import BaseModel
 
 from compute_horde_validator.validator.models import SystemEvent
 from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import (
@@ -283,7 +283,6 @@ async def test_message_manager_too_many_retries_on_send_failure(settings):
     await message_manager.stop()
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
 async def test_message_manager_unknown_local_message_type(settings):
@@ -322,13 +321,13 @@ async def test_message_manager_unknown_local_message_type(settings):
     await message_manager.stop()
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
 async def test_message_manager_unknown_transport_layer_message_type(settings):
     # Prepare incoming messages over transport layer
     class BogusMessage(BaseModel):
         prop: str = "test"
+
     stub = StubTransport("stub", messages=[BogusMessage().model_dump_json()])
 
     message_manager = MessageManager(connection_manager=MockConnectionManager(transport_layer=stub))

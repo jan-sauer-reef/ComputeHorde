@@ -1,35 +1,19 @@
 import asyncio
-import json
-from typing import Any
-from pydantic import BaseModel
 from unittest.mock import patch
-from asgiref.sync import sync_to_async
 
 import pytest
+from asgiref.sync import sync_to_async
 from channels.layers import get_channel_layer
-from compute_horde.fv_protocol.facilitator_requests import Response
-from compute_horde.fv_protocol.validator_requests import JobStatusUpdate, V0Heartbeat
-from compute_horde.transport import StubTransport
 from compute_horde_core.executor_class import ExecutorClass
 
-from compute_horde_validator.validator.models import OrganicJob, Miner, SystemEvent, MinerBlacklist
+from compute_horde_validator.validator.models import Miner, MinerBlacklist, OrganicJob, SystemEvent
 from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import (
     CHEATED_JOB_REPORT_CHANNEL,
-    HEARTBEAT_CHANNEL,
     JOB_REQUEST_CHANNEL,
-    JOB_STATUS_UPDATE_CHANNEL,
 )
 from compute_horde_validator.validator.organic_jobs.facilitator_client.job_request_manager import (
     JobRequestManager,
 )
-from compute_horde_validator.validator.organic_jobs.facilitator_client.metrics import (
-    VALIDATOR_FC_COMPONENT_STATE,
-    VALIDATOR_FC_MESSAGE_QUEUE_LENGTH,
-    VALIDATOR_FC_MESSAGE_SEND_FAILURES,
-    VALIDATOR_FC_MESSAGES_RECEIVED,
-    VALIDATOR_FC_MESSAGES_SENT,
-)
-
 
 
 async def wait_until_async(predicate, timeout: float = 10.0, interval: float = 0.01) -> None:
@@ -44,7 +28,9 @@ async def wait_until_async(predicate, timeout: float = 10.0, interval: float = 0
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
-@patch('compute_horde_validator.validator.organic_jobs.facilitator_client.job_request_manager.job_request_task.delay')
+@patch(
+    "compute_horde_validator.validator.organic_jobs.facilitator_client.job_request_manager.job_request_task.delay"
+)
 async def test_job_request_manager_submits_job_request(mock_delay, job_request):
     job_request_manager = JobRequestManager()
     await job_request_manager.start()
@@ -60,22 +46,27 @@ async def test_job_request_manager_submits_job_request(mock_delay, job_request):
     call_args = mock_delay.call_args[0]
     assert len(call_args) == 1
     assert call_args[0] == job_request.model_dump_json()
-    
-    await job_request_manager.stop()
 
+    await job_request_manager.stop()
 
 
 @pytest.mark.asyncio
 @pytest.mark.django_db(databases=["default", "default_alias"], transaction=True)
-@patch('compute_horde_validator.validator.organic_jobs.facilitator_client.jobs_task.verify_request_or_fail')
-@patch('compute_horde_validator.validator.organic_jobs.facilitator_client.jobs_task.slash_collateral_task.delay')
-async def test_job_request_manager_processes_cheated_job_report(mock_verify, mock_slash_collateral_task, settings, cheated_job):
+@patch(
+    "compute_horde_validator.validator.organic_jobs.facilitator_client.jobs_task.verify_request_or_fail"
+)
+@patch(
+    "compute_horde_validator.validator.organic_jobs.facilitator_client.jobs_task.slash_collateral_task.delay"
+)
+async def test_job_request_manager_processes_cheated_job_report(
+    mock_verify, mock_slash_collateral_task, settings, cheated_job
+):
     # Prepare databasee entries
     miner = await Miner.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
         hotkey="miner_client",
         collateral_wei=1,
     )
-    job = await OrganicJob.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
+    await OrganicJob.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
         job_uuid=cheated_job.job_uuid,
         status=OrganicJob.Status.COMPLETED,
         cheated=False,
@@ -92,7 +83,7 @@ async def test_job_request_manager_processes_cheated_job_report(mock_verify, moc
         allowance_blocks=None,
         allowance_job_value=0,
     )
-    
+
     job_request_manager = JobRequestManager()
     await job_request_manager.start()
     await asyncio.sleep(0.1)
@@ -100,7 +91,7 @@ async def test_job_request_manager_processes_cheated_job_report(mock_verify, moc
     # Send a job request
     layer = get_channel_layer()
     await layer.send(CHEATED_JOB_REPORT_CHANNEL, cheated_job.model_dump(mode="json"))
-    
+
     # Check that a JOB_CHEATED system event was created
     async def _acount_job_cheated() -> int:
         return (
@@ -125,11 +116,13 @@ async def test_job_request_manager_processes_cheated_job_report(mock_verify, moc
             )
             .acount()
         ) == 1
-    
+
     await wait_until_async(_acount_miner_blacklisted)
     assert await _acount_miner_blacklisted()
 
-    blacklist_entry = await sync_to_async(list)(MinerBlacklist.objects.using(settings.DEFAULT_DB_ALIAS).all())
+    blacklist_entry = await sync_to_async(list)(
+        MinerBlacklist.objects.using(settings.DEFAULT_DB_ALIAS).all()
+    )
     assert len(blacklist_entry) == 1
-    
+
     await job_request_manager.stop()

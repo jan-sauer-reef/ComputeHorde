@@ -120,7 +120,7 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
         # Set retry intervals to 0 as this is all simulated
         faci_client.message_manager.MSG_RETRY_DELAY = 0
         faci_client.message_manager.EMPTY_MSG_QUEUE_BACKOFF_INTERVAL = 0
-        
+
         await faci_client.start()
         await job_request_manager.start()
         await asyncio.sleep(0.1)
@@ -149,11 +149,10 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
 
         await faci_client.stop()
         await job_request_manager.stop()
-        
+
         # This await is crucial as it allows multiple other tasks to get cancelled properly
         # Otherwise "cancelling" tasks will persist until the end of the event loop and asyncio doesn't like that
         await asyncio.sleep(0)
-
 
     with (
         patch(

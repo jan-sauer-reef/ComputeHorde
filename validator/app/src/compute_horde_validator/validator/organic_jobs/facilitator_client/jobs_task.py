@@ -1,33 +1,19 @@
 import logging
 
 import pydantic
-import sentry_sdk
-from asgiref.sync import async_to_sync
-from celery import Task
 from compute_horde.fv_protocol.facilitator_requests import (
     OrganicJobRequest,
     V0JobCheated,
 )
 from compute_horde.fv_protocol.validator_requests import (
-    HordeFailureDetails,
-    JobRejectionDetails,
-    JobStatusMetadata,
     JobStatusUpdate,
 )
-from compute_horde.job_errors import HordeError
 from compute_horde.protocol_consts import (
-    HordeFailureReason,
-    JobParticipantType,
-    JobRejectionReason,
     JobStatus,
 )
-from compute_horde.protocol_messages import FailureContext
 from compute_horde_core.signature import SignedRequest, verify_signature
 from django.conf import settings
 
-from compute_horde_validator.celery import app
-from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
-from compute_horde_validator.validator.routing.types import JobRoutingException
 from compute_horde_validator.validator.dynamic_config import aget_config
 from compute_horde_validator.validator.models import (
     MinerBlacklist,

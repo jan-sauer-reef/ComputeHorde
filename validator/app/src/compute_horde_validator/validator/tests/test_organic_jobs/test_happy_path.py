@@ -1,5 +1,6 @@
-import pytest
 import threading
+
+import pytest
 from compute_horde.fv_protocol.validator_requests import JobStatusUpdate
 from compute_horde.protocol_messages import (
     V0AcceptJobRequest,
@@ -9,12 +10,12 @@ from compute_horde.protocol_messages import (
     V0VolumesReadyRequest,
 )
 
+from compute_horde_validator.celery import app
 from compute_horde_validator.validator.allowance.tests.mockchain import set_block_number
 from compute_horde_validator.validator.allowance.utils import blocks, manifests
 from compute_horde_validator.validator.allowance.utils.supertensor import supertensor
 from compute_horde_validator.validator.models import MetagraphSnapshot, OrganicJob
 from compute_horde_validator.validator.organic_jobs.facilitator_client import constants
-from compute_horde_validator.celery import app
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -55,20 +56,20 @@ def metagraph_snapshot(cycle):
     )
 
 
-
 @pytest.fixture
 def celery_in_thread():
     """Run Celery tasks in a separate thread"""
     original_apply_async = app.Task.apply_async
-    
+
     def apply_async_in_thread(self, *args):
         """Wrapper that runs the task in a separate thread"""
         import logging
+
         logger = logging.getLogger(__name__)
         logger.error(f"DEBUG: apply_async_wrapper called with task_self={self}, args={args[0][0]}")
         result = None
         exception = None
-        
+
         def run_in_thread():
             nonlocal result, exception
             try:
@@ -76,41 +77,44 @@ def celery_in_thread():
                 result = self.run(args[0][0])
             except Exception as e:
                 exception = e
-        
+
         thread = threading.Thread(target=run_in_thread, daemon=False)
         thread.start()
         thread.join(timeout=30)  # Wait up to 30 seconds
-        
+
         if exception:
             raise exception
-        
+
         # Return a mock result object
         class MockAsyncResult:
             def __init__(self, value):
                 self.value = value
-            
+
             def get(self, timeout=None):
                 return self.value
-        
+
         return MockAsyncResult(result)
-    
+
     # Monkeypatch apply_async on the base Task class so all tasks use it
     # This ensures tasks submitted indirectly (from functions) also run in threads
     from celery.app.task import Task as BaseTask
+
     original_base_apply_async = BaseTask.apply_async
-    
+
     BaseTask.apply_async = apply_async_in_thread
     app.Task.apply_async = apply_async_in_thread
-    
+
     yield
-    
+
     # Restore original after test
     BaseTask.apply_async = original_base_apply_async
     app.Task.apply_async = original_apply_async
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_basic_flow_works(job_request, faci_transport, miner_transport, execute_scenario, celery_in_thread, monkeypatch):
+async def test_basic_flow_works(
+    job_request, faci_transport, miner_transport, execute_scenario, celery_in_thread, monkeypatch
+):
     monkeypatch.setattr(constants, "TRANSPORT_LAYER_POLL_INTERVAL", 0.0)
     monkeypatch.setattr(constants, "WAIT_ON_ERROR_INTERVAL", 0.0)
 

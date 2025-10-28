@@ -3,7 +3,9 @@ import asyncio
 import pytest
 from channels.layers import get_channel_layer
 
-from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import HEARTBEAT_CHANNEL
+from compute_horde_validator.validator.organic_jobs.facilitator_client.constants import (
+    HEARTBEAT_CHANNEL,
+)
 from compute_horde_validator.validator.organic_jobs.facilitator_client.heartbeat_manager import (
     HeartbeatManager,
 )
@@ -23,10 +25,9 @@ async def test_heartbeat_manager_sends_heartbeats():
         async with asyncio.timeout(1):
             while True:
                 heartbeats.append(await layer.receive(HEARTBEAT_CHANNEL))
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     finally:
         await heartbeat_manager.stop()
 
     assert len(heartbeats) > 0
-

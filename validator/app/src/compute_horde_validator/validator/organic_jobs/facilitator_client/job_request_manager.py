@@ -3,30 +3,6 @@ import asyncio
 import pydantic
 import sentry_sdk
 from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0JobCheated
-
-from compute_horde_validator.validator.models import SystemEvent
-
-from .base import BaseComponent
-from .constants import CHEATED_JOB_REPORT_CHANNEL, JOB_REQUEST_CHANNEL, WAIT_ON_ERROR_INTERVAL, JOB_STATUS_UPDATE_CHANNEL
-from .exceptions import LocalChannelReceiveError
-from .jobs_task import job_request_task, process_miner_cheat_report, JobRequestVerificationFailed
-from .metrics import VALIDATOR_FC_COMPONENT_STATE
-from .util import (
-    interruptible_receive_local_message,
-    interruptible_wait,
-    log_system_error_event,
-    stop_task_gracefully,
-    safe_send_local_message,
-)
-from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
-from compute_horde_validator.validator.routing.types import JobRoutingException
-from compute_horde.protocol_consts import (
-    HordeFailureReason,
-    JobParticipantType,
-    JobRejectionReason,
-    JobStatus,
-)
-from compute_horde.protocol_messages import FailureContext
 from compute_horde.fv_protocol.validator_requests import (
     HordeFailureDetails,
     JobRejectionDetails,
@@ -34,6 +10,35 @@ from compute_horde.fv_protocol.validator_requests import (
     JobStatusUpdate,
 )
 from compute_horde.job_errors import HordeError
+from compute_horde.protocol_consts import (
+    HordeFailureReason,
+    JobParticipantType,
+    JobRejectionReason,
+    JobStatus,
+)
+from compute_horde.protocol_messages import FailureContext
+
+from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
+from compute_horde_validator.validator.models import SystemEvent
+from compute_horde_validator.validator.routing.types import JobRoutingException
+
+from .base import BaseComponent
+from .constants import (
+    CHEATED_JOB_REPORT_CHANNEL,
+    JOB_REQUEST_CHANNEL,
+    JOB_STATUS_UPDATE_CHANNEL,
+    WAIT_ON_ERROR_INTERVAL,
+)
+from .exceptions import LocalChannelReceiveError
+from .jobs_task import JobRequestVerificationFailed, job_request_task, process_miner_cheat_report
+from .metrics import VALIDATOR_FC_COMPONENT_STATE
+from .util import (
+    interruptible_receive_local_message,
+    interruptible_wait,
+    log_system_error_event,
+    safe_send_local_message,
+    stop_task_gracefully,
+)
 
 
 class JobRequestManager(BaseComponent):
@@ -85,7 +90,9 @@ class JobRequestManager(BaseComponent):
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except JobRequestVerificationFailed as exc:
-                self._logger.error(f"Job request verification failed: {job_request.model_dump_json()}")
+                self._logger.error(
+                    f"Job request verification failed: {job_request.model_dump_json()}"
+                )
                 await self._send_job_rejected_message(
                     job_uuid=job_request.uuid,
                     message=exc.message,
@@ -96,7 +103,9 @@ class JobRequestManager(BaseComponent):
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except (NotEnoughAllowanceException, JobRoutingException) as exc:
-                self._logger.error(f"Job could not be routed to a miner ({type(exc).__qualname__}): {job_request.model_dump_json()}")
+                self._logger.error(
+                    f"Job could not be routed to a miner ({type(exc).__qualname__}): {job_request.model_dump_json()}"
+                )
                 await self._send_job_rejected_message(
                     job_uuid=job_request.uuid,
                     message="Job could not be routed to a miner",
@@ -215,7 +224,6 @@ class JobRequestManager(BaseComponent):
             ),
         )
         await safe_send_local_message(channel=JOB_STATUS_UPDATE_CHANNEL, message=msg)
-
 
     async def start(self) -> None:
         """Starts the main client."""

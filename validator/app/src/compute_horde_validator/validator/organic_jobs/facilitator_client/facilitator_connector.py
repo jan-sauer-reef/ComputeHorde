@@ -677,7 +677,7 @@ class MessageManager(BaseComponent):
             pass
         else:
             if channel != JOB_STATUS_UPDATE_CHANNEL:
-                raise MessageChannelException(msg, channel)
+                raise MessageChannelException(str(msg), channel)
             await self._enqueue_message(job_status_update)
             return
 
@@ -687,7 +687,7 @@ class MessageManager(BaseComponent):
             pass
         else:
             if channel != HEARTBEAT_CHANNEL:
-                raise MessageChannelException(msg, channel)
+                raise MessageChannelException(str(msg), channel)
             await self._enqueue_message(heartbeat)
             return
 
