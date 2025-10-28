@@ -223,22 +223,24 @@ class ConnectionManager(BaseComponent):
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except TransportConnectionError as exc:
+                msg = f"Transport layer connection error: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Transport layer connection error: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.TRANSPORT_CONNECTION_ERROR,
-                    logger=self._logger,
                 )
                 VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="transport_error").inc()
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except AuthenticationError as exc:
+                msg = f"Authentication error: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Authentication error: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.AUTHENTICATION_ERROR,
-                    logger=self._logger,
                 )
                 VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="auth_error").inc()
                 await interruptible_wait(
@@ -246,11 +248,12 @@ class ConnectionManager(BaseComponent):
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Unexpected error: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Unexpected error: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
                 VALIDATOR_FC_TRANSPORT_LAYER_EVENTS.labels(event="unknown_error").inc()
                 await interruptible_wait(
@@ -511,21 +514,21 @@ class MessageManager(BaseComponent):
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelSendError as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except MessageTypeException as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-                    logger=self._logger,
                 )
                 VALIDATOR_FC_MESSAGES_RECEIVED.labels(message_type="unknown").inc()
                 await interruptible_wait(
@@ -533,11 +536,12 @@ class MessageManager(BaseComponent):
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Error listening to incoming transport layer messages: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Error listening to incoming transport layer messages: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
@@ -634,22 +638,23 @@ class MessageManager(BaseComponent):
                 await self._send_remaining_messages()
                 break
             except MessageRetryLimitExceeded as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Error sending messages: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Error sending messages: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
@@ -701,22 +706,23 @@ class MessageManager(BaseComponent):
                 self._stop_event.set()
                 break
             except (MessageTypeException, MessageChannelException) as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Error listening for local messages: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Error listening for local messages: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
