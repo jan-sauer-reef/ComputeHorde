@@ -16,8 +16,8 @@ from compute_horde_validator.validator.allowance.tests.mockchain import set_bloc
 from compute_horde_validator.validator.allowance.types import MetagraphData
 from compute_horde_validator.validator.allowance.utils import blocks, manifests
 from compute_horde_validator.validator.allowance.utils.supertensor import supertensor
-from compute_horde_validator.validator.organic_jobs.facilitator_client import constants
 from compute_horde_validator.validator.models import OrganicJob
+from compute_horde_validator.validator.organic_jobs.facilitator_client import constants
 
 pytestmark = [
     pytest.mark.asyncio,

@@ -13,6 +13,7 @@ from compute_horde.protocol_consts import (
 )
 from compute_horde_core.signature import SignedRequest, verify_signature
 from django.conf import settings
+from django.utils.timezone import now
 
 from compute_horde_validator.validator.dynamic_config import aget_config
 from compute_horde_validator.validator.models import (
