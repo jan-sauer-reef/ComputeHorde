@@ -129,108 +129,7 @@ async def process_miner_cheat_report(cheated_job_request: V0JobCheated) -> None:
         slash_collateral_task.delay(str(job.job_uuid))
 
 
-class JobRequestTask(Task):  # type: ignore[type-arg]
-    """
-    A custom task base class that defines a callback in case a task fails.
-
-    Any task that uses this base class MUST have the job request as the first argument!
-    """
-
-    def on_failure(self, exc, task_id, args, kwargs, einfo):
-        try:
-            job_request: OrganicJobRequest = pydantic.TypeAdapter(OrganicJobRequest).validate_json(
-                kwargs["job_request"] if kwargs else args[0]
-            )
-            job_uuid = job_request.uuid
-        except pydantic.ValidationError:
-            job_uuid = "UNKNOWN"  # uuid can't be parsed if the job request was mangled
-
-        if isinstance(exc, InvalidJobRequestFormat):
-            message = self._make_job_rejected_message(
-                job_uuid=job_uuid,
-                message=exc.message,
-                rejected_by=JobParticipantType.VALIDATOR,
-                reason=JobRejectionReason.INVALID_REQUEST_FORMAT,
-            )
-        elif isinstance(exc, JobRequestVerificationFailed):
-            message = self._make_job_rejected_message(
-                job_uuid=job_uuid,
-                message=exc.message,
-                rejected_by=JobParticipantType.VALIDATOR,
-                reason=JobRejectionReason.INVALID_SIGNATURE,
-            )
-        elif isinstance(exc, (NotEnoughAllowanceException, JobRoutingException)):
-            message = self._make_job_rejected_message(
-                job_uuid=job_uuid,
-                message="Job could not be routed to a miner",
-                rejected_by=JobParticipantType.VALIDATOR,
-                reason=JobRejectionReason.NO_MINER_FOR_JOB,
-                context={"exception_type": type(exc).__qualname__},
-            )
-        else:
-            sentry_sdk.capture_exception(exc)
-            wrapped_exc = HordeError.wrap_unhandled(exc)
-            message = self._make_horde_failed_message(
-                job_uuid=job_uuid,
-                reported_by=JobParticipantType.VALIDATOR,
-                message=wrapped_exc.message,
-                reason=wrapped_exc.reason,
-                context=wrapped_exc.context,
-            )
-
-        try:
-            async_to_sync(safe_send_local_message)(
-                channel=JOB_STATUS_UPDATE_CHANNEL,
-                message=message,
-            )
-        except LocalChannelSendError as exc:
-            logger.error(str(exc))
-
-    def _make_job_rejected_message(
-        self,
-        job_uuid: str,
-        message: str,
-        rejected_by: JobParticipantType,
-        reason: JobRejectionReason,
-        context: FailureContext | None = None,
-    ) -> JobStatusUpdate:
-        return JobStatusUpdate(
-            uuid=job_uuid,
-            status=JobStatus.REJECTED,
-            metadata=JobStatusMetadata(
-                job_rejection_details=JobRejectionDetails(
-                    rejected_by=rejected_by,
-                    reason=reason,
-                    message=message,
-                    context=context,
-                ),
-            ),
-        )
-
-    def _make_horde_failed_message(
-        self,
-        job_uuid: str,
-        message: str,
-        reported_by: JobParticipantType,
-        reason: HordeFailureReason,
-        context: FailureContext | None = None,
-    ) -> JobStatusUpdate:
-        return JobStatusUpdate(
-            uuid=job_uuid,
-            status=JobStatus.HORDE_FAILED,
-            metadata=JobStatusMetadata(
-                horde_failure_details=HordeFailureDetails(
-                    reported_by=reported_by,
-                    reason=reason,
-                    message=message,
-                    context=context,
-                ),
-            ),
-        )
-
-
-@app.task(base=JobRequestTask)
-def job_request_task(job_request: str) -> None:
+async def job_request_task(job_request: str) -> None:
     """
     Select an appropriate miner for the task and submit the task to it.
 
@@ -245,11 +144,11 @@ def job_request_task(job_request: str) -> None:
         raise InvalidJobRequestFormat(f"Invalid job request format: {job_request}")
 
     logger.debug(f"Received signed job request: {organic_job_request}")
-    async_to_sync(verify_request_or_fail)(organic_job_request)
+    await verify_request_or_fail(organic_job_request)
 
     # Notify facilitator that the job request has been received
     try:
-        async_to_sync(safe_send_local_message)(
+        await safe_send_local_message(
             channel=JOB_STATUS_UPDATE_CHANNEL,
             message=JobStatusUpdate(uuid=organic_job_request.uuid, status=JobStatus.RECEIVED),
         )
@@ -258,12 +157,12 @@ def job_request_task(job_request: str) -> None:
         logger.error(str(exc))
 
     # Select an appropriate miner for the task and submit the task to it
-    job_route = async_to_sync(routing().pick_miner_for_job_request)(organic_job_request)
+    job_route = await routing().pick_miner_for_job_request(organic_job_request)
     logger.info(f"Selected miner {job_route.miner.hotkey_ss58} for job {organic_job_request.uuid}")
-    job = async_to_sync(execute_organic_job_request_on_worker)(organic_job_request, job_route)
+    job = await execute_organic_job_request_on_worker(organic_job_request, job_route)
     logger.info(
         f"Job {organic_job_request.uuid} finished with status: {job.status} (comment={job.comment})"
     )
 
     if job.status == OrganicJob.Status.FAILED:
-        async_to_sync(report_miner_failed_job)(job)
+        await report_miner_failed_job(job)

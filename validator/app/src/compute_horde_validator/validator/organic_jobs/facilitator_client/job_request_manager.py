@@ -7,16 +7,33 @@ from compute_horde.fv_protocol.facilitator_requests import OrganicJobRequest, V0
 from compute_horde_validator.validator.models import SystemEvent
 
 from .base import BaseComponent
-from .constants import CHEATED_JOB_REPORT_CHANNEL, JOB_REQUEST_CHANNEL, WAIT_ON_ERROR_INTERVAL
+from .constants import CHEATED_JOB_REPORT_CHANNEL, JOB_REQUEST_CHANNEL, WAIT_ON_ERROR_INTERVAL, JOB_STATUS_UPDATE_CHANNEL
 from .exceptions import LocalChannelReceiveError
-from .jobs_task import job_request_task, process_miner_cheat_report
+from .jobs_task import job_request_task, process_miner_cheat_report, JobRequestVerificationFailed
 from .metrics import VALIDATOR_FC_COMPONENT_STATE
 from .util import (
     interruptible_receive_local_message,
     interruptible_wait,
     log_system_error_event,
     stop_task_gracefully,
+    safe_send_local_message,
 )
+from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
+from compute_horde_validator.validator.routing.types import JobRoutingException
+from compute_horde.protocol_consts import (
+    HordeFailureReason,
+    JobParticipantType,
+    JobRejectionReason,
+    JobStatus,
+)
+from compute_horde.protocol_messages import FailureContext
+from compute_horde.fv_protocol.validator_requests import (
+    HordeFailureDetails,
+    JobRejectionDetails,
+    JobStatusMetadata,
+    JobStatusUpdate,
+)
+from compute_horde.job_errors import HordeError
 
 
 class JobRequestManager(BaseComponent):
@@ -40,21 +57,12 @@ class JobRequestManager(BaseComponent):
                 )
                 if msg_or_none is not None:
                     job_request: OrganicJobRequest = OrganicJobRequest.model_validate(msg_or_none)
-                    job_request_task.delay(job_request.model_dump_json())
+                    # job_request_task.delay(job_request.model_dump_json())
+                    await job_request_task(job_request.model_dump_json())
             except asyncio.CancelledError:
                 self._stop_event.set()
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
-            except LocalChannelReceiveError as exc:
-                self._logger.error(str(exc))
-                await log_system_error_event(
-                    message=str(exc),
-                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-                    event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
-                )
-                await interruptible_wait(
-                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
-                )
             except pydantic.ValidationError:
                 msg = f"Invalid job request received from facilitator: {msg_or_none}"
                 self._logger.error(msg)
@@ -66,15 +74,49 @@ class JobRequestManager(BaseComponent):
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
+            except LocalChannelReceiveError as exc:
+                self._logger.error(str(exc))
+                await log_system_error_event(
+                    message=str(exc),
+                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
+                    event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
+                )
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
+            except JobRequestVerificationFailed as exc:
+                self._logger.error(f"Job request verification failed: {job_request.model_dump_json()}")
+                await self._send_job_rejected_message(
+                    job_uuid=job_request.uuid,
+                    message=exc.message,
+                    rejected_by=JobParticipantType.VALIDATOR,
+                    reason=JobRejectionReason.INVALID_SIGNATURE,
+                )
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
+            except (NotEnoughAllowanceException, JobRoutingException) as exc:
+                self._logger.error(f"Job could not be routed to a miner ({type(exc).__qualname__}): {job_request.model_dump_json()}")
+                await self._send_job_rejected_message(
+                    job_uuid=job_request.uuid,
+                    message="Job could not be routed to a miner",
+                    rejected_by=JobParticipantType.VALIDATOR,
+                    reason=JobRejectionReason.NO_MINER_FOR_JOB,
+                    context={"exception_type": type(exc).__qualname__},
+                )
+                await interruptible_wait(
+                    timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
+                )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
-                msg = f"Error handling job request: {type(exc).__name__}: {exc}"
-                self._logger.error(msg)
-                self._logger.error(f"DEBUG: {type(job_request.model_dump_json())}")
-                await log_system_error_event(
-                    message=msg,
-                    event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
-                    event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
+                self._logger.error(f"Error handling job request: {type(exc).__name__}: {exc}")
+                wrapped_exc = HordeError.wrap_unhandled(exc)
+                await self._make_horde_failed_message(
+                    job_uuid=job_request.uuid,
+                    reported_by=JobParticipantType.VALIDATOR,
+                    message=wrapped_exc.message,
+                    reason=wrapped_exc.reason,
+                    context=wrapped_exc.context,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
@@ -129,6 +171,51 @@ class JobRequestManager(BaseComponent):
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
+
+    async def _send_job_rejected_message(
+        self,
+        job_uuid: str,
+        message: str,
+        rejected_by: JobParticipantType,
+        reason: JobRejectionReason,
+        context: FailureContext | None = None,
+    ) -> None:
+        msg = JobStatusUpdate(
+            uuid=job_uuid,
+            status=JobStatus.REJECTED,
+            metadata=JobStatusMetadata(
+                job_rejection_details=JobRejectionDetails(
+                    rejected_by=rejected_by,
+                    reason=reason,
+                    message=message,
+                    context=context,
+                ),
+            ),
+        )
+        await safe_send_local_message(channel=JOB_STATUS_UPDATE_CHANNEL, message=msg)
+
+    async def _make_horde_failed_message(
+        self,
+        job_uuid: str,
+        message: str,
+        reported_by: JobParticipantType,
+        reason: HordeFailureReason,
+        context: FailureContext | None = None,
+    ) -> None:
+        msg = JobStatusUpdate(
+            uuid=job_uuid,
+            status=JobStatus.HORDE_FAILED,
+            metadata=JobStatusMetadata(
+                horde_failure_details=HordeFailureDetails(
+                    reported_by=reported_by,
+                    reason=reason,
+                    message=message,
+                    context=context,
+                ),
+            ),
+        )
+        await safe_send_local_message(channel=JOB_STATUS_UPDATE_CHANNEL, message=msg)
+
 
     async def start(self) -> None:
         """Starts the main client."""

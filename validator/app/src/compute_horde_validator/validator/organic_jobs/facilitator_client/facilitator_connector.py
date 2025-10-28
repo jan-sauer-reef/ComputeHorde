@@ -679,6 +679,7 @@ class MessageManager(BaseComponent):
             if channel != JOB_STATUS_UPDATE_CHANNEL:
                 raise MessageChannelException(msg, channel)
             await self._enqueue_message(job_status_update)
+            return
 
         try:
             heartbeat: V0Heartbeat = V0Heartbeat.model_validate(msg)
@@ -688,6 +689,7 @@ class MessageManager(BaseComponent):
             if channel != HEARTBEAT_CHANNEL:
                 raise MessageChannelException(msg, channel)
             await self._enqueue_message(heartbeat)
+            return
 
         raise MessageTypeException(str(msg))
 

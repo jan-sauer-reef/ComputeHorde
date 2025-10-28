@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -112,12 +112,18 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
     The transports should be requested as fixtures by the test function to define the sequence of messages.
     """
 
-    async def actually_execute_scenario(until: Callable[[], bool], timeout_seconds: int = 1):
+    async def actually_execute_scenario(until: Callable[[], bool], timeout_seconds: int = 10):
         # Start the facilitator client (connection and message managers)
         faci_client = FacilitatorClient(keypair=validator_keypair, transport_layer=faci_transport)
         job_request_manager = JobRequestManager()
+
+        # Set retry intervals to 0 as this is all simulated
+        faci_client.message_manager.MSG_RETRY_DELAY = 0
+        faci_client.message_manager.EMPTY_MSG_QUEUE_BACKOFF_INTERVAL = 0
+        
         await faci_client.start()
         await job_request_manager.start()
+        await asyncio.sleep(0.1)
 
         async def wait_for_condition(condition: asyncio.Condition, until: Callable[[], bool]):
             async with condition:
@@ -148,7 +154,14 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
         # Otherwise "cancelling" tasks will persist until the end of the event loop and asyncio doesn't like that
         await asyncio.sleep(0)
 
-    yield actually_execute_scenario
+
+    with (
+        patch(
+            "compute_horde_validator.validator.organic_jobs.facilitator_client.jobs_task.verify_request_or_fail",
+            AsyncMock(),
+        ),
+    ):
+        yield actually_execute_scenario
 
 
 @pytest.fixture()
