@@ -46,32 +46,35 @@ class JobRequestManager(BaseComponent):
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelReceiveError as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except pydantic.ValidationError:
+                msg = f"Invalid job request received from facilitator: {msg_or_none}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Invalid job request received from facilitator: {msg_or_none}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Error handling job request: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
+                self._logger.error(f"DEBUG: {type(job_request.model_dump_json())}")
                 await log_system_error_event(
-                    message=f"Error handling job request: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
@@ -94,32 +97,34 @@ class JobRequestManager(BaseComponent):
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelReceiveError as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_RECEIVE_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except pydantic.ValidationError:
+                msg = f"Invalid cheated job report received from facilitator: {msg_or_none}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Invalid cheated job report received from facilitator: {msg_or_none}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.UNEXPECTED_MESSAGE,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Error handling cheated job report: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Error handling cheated job report: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
                 await interruptible_wait(
                     timeout=WAIT_ON_ERROR_INTERVAL, stop_event=self._stop_event

@@ -26,7 +26,7 @@ class AbstractTransport(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def start(self, **kwargs) -> None:
+    async def start(self, *args, **kwargs) -> None:
         pass
 
     @abc.abstractmethod

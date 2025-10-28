@@ -121,22 +121,15 @@ async def log_system_error_event(
     message: str,
     event_type: SystemEvent.EventType,
     event_subtype: SystemEvent.EventSubType,
-    logger: logging.Logger | None = None,
 ) -> None:
     """
-    Logs a system error event to the default logs and database.
+    Logs a system error event to the database.
 
     Args:
         message (str): The message to log and save.
         event_type (SystemEvent.EventType): The type of the system event.
         event_subtype (SystemEvent.EventSubType): The subtype of the system event.
-        logger (logging.Logger | None): The logger to use. Included to make
-            it easier to trace the source of the error as this is a utility
-            function that may be used by multiple components. If None, a
-            default logger will be used. Defaults to None.
     """
-    logger_to_use = logger if logger is not None else default_logger
-    logger_to_use.error(message)
     await SystemEvent.objects.using(settings.DEFAULT_DB_ALIAS).acreate(
         type=event_type,
         subtype=event_subtype,

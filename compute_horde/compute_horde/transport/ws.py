@@ -67,16 +67,16 @@ class WSTransport(AbstractTransport):
     def is_connected(self) -> bool:
         return self._ws and self._ws.state is websockets.State.OPEN
 
-    async def start(self) -> None:
+    async def start(self, *args, **kwargs) -> None:
         async with self.connect_lock:
-            await self.connect()
+            await self.connect(**kwargs)
 
     async def stop(self) -> None:
         async with self.connect_lock:
             if self.is_connected():
                 await self._ws.close()
 
-    async def connect(self, **kwargs):
+    async def connect(self, *args, **kwargs):
         if self.is_connected():
             return
 

@@ -44,19 +44,20 @@ class HeartbeatManager(BaseComponent):
                 VALIDATOR_FC_COMPONENT_STATE.labels(component=self.name).set(0)
                 break
             except LocalChannelSendError as exc:
+                self._logger.error(str(exc))
                 await log_system_error_event(
                     message=str(exc),
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.MESSAGE_SEND_ERROR,
-                    logger=self._logger,
                 )
             except Exception as exc:
                 sentry_sdk.capture_exception(exc)
+                msg = f"Error sending heartbeat message: {type(exc).__name__}: {exc}"
+                self._logger.error(msg)
                 await log_system_error_event(
-                    message=f"Error sending heartbeat message: {type(exc).__name__}: {exc}",
+                    message=msg,
                     event_type=SystemEvent.EventType.FACILITATOR_CLIENT_ERROR,
                     event_subtype=SystemEvent.EventSubType.GENERIC_ERROR,
-                    logger=self._logger,
                 )
 
     async def start(self) -> None:

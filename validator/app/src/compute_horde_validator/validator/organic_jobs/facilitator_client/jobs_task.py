@@ -27,6 +27,7 @@ from django.conf import settings
 
 from compute_horde_validator.celery import app
 from compute_horde_validator.validator.allowance.types import NotEnoughAllowanceException
+from compute_horde_validator.validator.routing.types import JobRoutingException
 from compute_horde_validator.validator.dynamic_config import aget_config
 from compute_horde_validator.validator.models import (
     MinerBlacklist,
@@ -158,7 +159,7 @@ class JobRequestTask(Task):  # type: ignore[type-arg]
                 rejected_by=JobParticipantType.VALIDATOR,
                 reason=JobRejectionReason.INVALID_SIGNATURE,
             )
-        elif isinstance(exc, NotEnoughAllowanceException):
+        elif isinstance(exc, (NotEnoughAllowanceException, JobRoutingException)):
             message = self._make_job_rejected_message(
                 job_uuid=job_uuid,
                 message="Job could not be routed to a miner",
