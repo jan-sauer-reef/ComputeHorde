@@ -20,6 +20,9 @@ from compute_horde_validator.validator.models import (
 from compute_horde_validator.validator.organic_jobs.facilitator_client.facilitator_connector import (
     FacilitatorClient,
 )
+from compute_horde_validator.validator.organic_jobs.facilitator_client.job_request_manager import (
+    JobRequestManager,
+)
 from compute_horde_validator.validator.tests.transport import SimulationTransport
 
 
@@ -112,7 +115,9 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
     async def actually_execute_scenario(until: Callable[[], bool], timeout_seconds: int = 1):
         # Start the facilitator client (connection and message managers)
         faci_client = FacilitatorClient(keypair=validator_keypair, transport_layer=faci_transport)
+        job_request_manager = JobRequestManager()
         await faci_client.start()
+        await job_request_manager.start()
 
         async def wait_for_condition(condition: asyncio.Condition, until: Callable[[], bool]):
             async with condition:
@@ -137,7 +142,8 @@ def execute_scenario(faci_transport, miner_transports, validator_keypair):
                 future.cancel()
 
         await faci_client.stop()
-
+        await job_request_manager.stop()
+        
         # This await is crucial as it allows multiple other tasks to get cancelled properly
         # Otherwise "cancelling" tasks will persist until the end of the event loop and asyncio doesn't like that
         await asyncio.sleep(0)
