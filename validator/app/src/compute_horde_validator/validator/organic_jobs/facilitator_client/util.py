@@ -219,7 +219,8 @@ async def interruptible_receive_transport_layer_message(
     connection_manager: ConnectionManager, stop_event: asyncio.Event | None = None
 ) -> str | bytes | None:
     """
-    Waits for a message from the transport layer via the connection manager with the option of cancelling a blocking receive call by a stop event.
+    Waits for a message from the transport layer via the connection manager with the option of
+    canceling a blocking receive call by a stop event.
 
     Args:
         connection_manager (ConnectionManager): The connection manager over which

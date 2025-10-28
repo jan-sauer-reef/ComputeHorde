@@ -567,7 +567,7 @@ class MessageManager(BaseComponent):
                 await asyncio.wait_for(send_task, timeout=self.TRANSPORT_LAYER_MESSAGE_SEND_TIMEOUT)
             except Exception as exc:
                 if send_task is None:
-                    # Asyncio could fail in creating the send task itself which would be no fault of the connection itself and shoukdn't count against the message retries
+                    # Asyncio could fail in creating the send task itself which would be no fault of the connection itself and shouldn't count against the message retries
                     self._logger.error(
                         "Failed to create send task for message (%s) with error (%s: %s) and attempting to retry",
                         msg.content,

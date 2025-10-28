@@ -167,7 +167,12 @@ async def test_two_jobs(
     miner_transport,
     miner_transports,
     execute_scenario,
+    celery_in_thread,
+    monkeypatch,
 ):
+    monkeypatch.setattr(constants, "TRANSPORT_LAYER_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(constants, "WAIT_ON_ERROR_INTERVAL", 0.0)
+
     # Job 1
     await faci_transport.add_message(job_request, send_before=0)
 
